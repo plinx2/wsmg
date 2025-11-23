@@ -27,7 +27,7 @@ import (
 //	    Force  bool   `flag:"force" required:"true" usage:"強制実行"`
 //	}{}
 //	cli.BindFlags(cmd, opts)
-func BindFlags(cmd *cobra.Command, opts interface{}) error {
+func BindFlags(cmd *cobra.Command, opts any) error {
 	val := reflect.ValueOf(opts)
 	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Struct {
 		return fmt.Errorf("opts must be a pointer to struct")

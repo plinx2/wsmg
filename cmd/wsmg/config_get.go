@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/plinx2/wsmg/internal/cli"
@@ -8,11 +9,14 @@ import (
 	"github.com/spf13/viper"
 )
 
+// ConfigGetOptions はコンフィグ取得コマンドのオプションです
+type ConfigGetOptions struct {
+	Default string `flag:"default" short:"d" default:"" usage:"キーが存在しない場合のデフォルト値"`
+}
+
 func newConfigGetCmd() *cobra.Command {
 	// オプション定義
-	opts := &struct {
-		Default string `flag:"default" short:"d" default:"" usage:"キーが存在しない場合のデフォルト値"`
-	}{}
+	opts := &ConfigGetOptions{}
 
 	// コマンド定義
 	cmd := &cobra.Command{
@@ -21,8 +25,7 @@ func newConfigGetCmd() *cobra.Command {
 		Long:  `指定したキーの設定値を取得します。ドット記法で階層的なキーにアクセスできます。`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			key := args[0]
-			return runConfigGet(key, opts.Default)
+			return runConfigGet(c.Context(), args[0], opts)
 		},
 	}
 
@@ -34,11 +37,11 @@ func newConfigGetCmd() *cobra.Command {
 	return cmd
 }
 
-func runConfigGet(key, defaultValue string) error {
+func runConfigGet(ctx context.Context, key string, opts *ConfigGetOptions) error {
 	// キーが存在するかチェック
 	if !viper.IsSet(key) {
-		if defaultValue != "" {
-			fmt.Println(defaultValue)
+		if opts.Default != "" {
+			fmt.Println(opts.Default)
 			return nil
 		}
 		return fmt.Errorf("キー '%s' は存在しません", key)
@@ -55,11 +58,11 @@ func runConfigGet(key, defaultValue string) error {
 		fmt.Println(v)
 	case bool:
 		fmt.Println(v)
-	case []interface{}:
+	case []any:
 		for _, item := range v {
 			fmt.Println(item)
 		}
-	case map[string]interface{}:
+	case map[string]any:
 		for k, val := range v {
 			fmt.Printf("%s: %v\n", k, val)
 		}

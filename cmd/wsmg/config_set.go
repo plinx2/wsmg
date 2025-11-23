@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,11 +11,14 @@ import (
 	"github.com/spf13/viper"
 )
 
+// ConfigSetOptions はコンフィグ設定コマンドのオプションです
+type ConfigSetOptions struct {
+	Type string `flag:"type" short:"t" default:"" usage:"値の型を指定 (string, int, bool, array)"`
+}
+
 func newConfigSetCmd() *cobra.Command {
 	// オプション定義
-	opts := &struct {
-		Type string `flag:"type" short:"t" default:"" usage:"値の型を指定 (string, int, bool, array)"`
-	}{}
+	opts := &ConfigSetOptions{}
 
 	// コマンド定義
 	cmd := &cobra.Command{
@@ -23,9 +27,7 @@ func newConfigSetCmd() *cobra.Command {
 		Long:  `指定したキーに値を設定します。設定ファイルに永続化されます。`,
 		Args:  cobra.ExactArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
-			key := args[0]
-			value := args[1]
-			return runConfigSet(key, value, opts.Type)
+			return runConfigSet(c.Context(), args[0], args[1], opts)
 		},
 	}
 
@@ -37,12 +39,12 @@ func newConfigSetCmd() *cobra.Command {
 	return cmd
 }
 
-func runConfigSet(key, value, valueType string) error {
+func runConfigSet(ctx context.Context, key, value string, opts *ConfigSetOptions) error {
 	// 値を適切な型に変換
-	var convertedValue interface{}
+	var convertedValue any
 	var err error
 
-	if valueType == "" {
+	if opts.Type == "" {
 		// 型を自動判定
 		convertedValue, err = autoConvertValue(value)
 		if err != nil {
@@ -50,7 +52,7 @@ func runConfigSet(key, value, valueType string) error {
 		}
 	} else {
 		// 指定された型に変換
-		convertedValue, err = convertValueByType(value, valueType)
+		convertedValue, err = convertValueByType(value, opts.Type)
 		if err != nil {
 			return fmt.Errorf("値の変換に失敗しました: %w", err)
 		}
@@ -79,7 +81,7 @@ func runConfigSet(key, value, valueType string) error {
 	return nil
 }
 
-func autoConvertValue(value string) (interface{}, error) {
+func autoConvertValue(value string) (any, error) {
 	// bool値のチェック
 	if value == "true" {
 		return true, nil
@@ -102,7 +104,7 @@ func autoConvertValue(value string) (interface{}, error) {
 	return value, nil
 }
 
-func convertValueByType(value, valueType string) (interface{}, error) {
+func convertValueByType(value, valueType string) (any, error) {
 	switch valueType {
 	case "string":
 		return value, nil

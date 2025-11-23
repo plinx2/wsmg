@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,11 +12,14 @@ import (
 	"github.com/spf13/viper"
 )
 
+// ConfigEditOptions はコンフィグ編集コマンドのオプションです
+type ConfigEditOptions struct {
+	Editor string `flag:"editor" short:"e" default:"" usage:"使用するエディタを指定"`
+}
+
 func newConfigEditCmd() *cobra.Command {
 	// オプション定義
-	opts := &struct {
-		Editor string `flag:"editor" short:"e" default:"" usage:"使用するエディタを指定"`
-	}{}
+	opts := &ConfigEditOptions{}
 
 	// コマンド定義
 	cmd := &cobra.Command{
@@ -24,7 +28,7 @@ func newConfigEditCmd() *cobra.Command {
 		Long: `設定ファイルをデフォルトエディタで開きます。
 $EDITOR 環境変数が設定されていない場合は vi を使用します。`,
 		RunE: func(c *cobra.Command, args []string) error {
-			return runConfigEdit(opts.Editor)
+			return runConfigEdit(c.Context(), opts)
 		},
 	}
 
@@ -36,7 +40,7 @@ $EDITOR 環境変数が設定されていない場合は vi を使用します�
 	return cmd
 }
 
-func runConfigEdit(editorFlag string) error {
+func runConfigEdit(ctx context.Context, opts *ConfigEditOptions) error {
 	configFile := viper.ConfigFileUsed()
 
 	if configFile == "" {
@@ -44,7 +48,7 @@ func runConfigEdit(editorFlag string) error {
 	}
 
 	// 使用するエディタを決定
-	editor := editorFlag
+	editor := opts.Editor
 	if editor == "" {
 		editor = os.Getenv("EDITOR")
 	}
@@ -70,16 +74,13 @@ func runConfigEdit(editorFlag string) error {
 		return fmt.Errorf("設定ファイルの読み込みに失敗しました: %w", err)
 	}
 
-	var config map[string]interface{}
+	var config map[string]any
 	if err := json.Unmarshal(data, &config); err != nil {
-		fmt.Printf("\n警告: JSON の構文エラーがあります: %v\n", err)
-		fmt.Print("再編集しますか? (y/N): ")
-		var answer string
-		fmt.Scanln(&answer)
-		if answer == "y" || answer == "Y" {
-			return runConfigEdit(editorFlag)
+		fmt.Printf("\nWarning: JSON syntax error: %v\n", err)
+		if cli.ConfirmAction("Re-edit?") {
+			return runConfigEdit(ctx, opts)
 		}
-		return fmt.Errorf("設定ファイルに構文エラーがあります")
+		return fmt.Errorf("config file has syntax error")
 	}
 
 	fmt.Println("Configuration saved successfully.")

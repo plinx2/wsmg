@@ -20,6 +20,33 @@ When working on development tasks that span multiple repositories, `wsmg` create
 go install github.com/plinx2/wsmg@latest
 ```
 
+### Shell Completion
+
+Enable shell completion for faster command input:
+
+```bash
+# Bash
+wsmg completion bash > /etc/bash_completion.d/wsmg
+source /etc/bash_completion.d/wsmg
+
+# Zsh
+wsmg completion zsh > "${fpath[1]}/_wsmg"
+# Restart your shell
+
+# Fish
+wsmg completion fish > ~/.config/fish/completions/wsmg.fish
+
+# PowerShell
+wsmg completion powershell > wsmg.ps1
+# Add to your PowerShell profile
+```
+
+The completion supports:
+- Command and subcommand names
+- Workspace names
+- Repository paths
+- Flag options (format, provider, etc.)
+
 ## Configuration
 
 Configuration file: `~/.config/wsmg/wsmg.json`
@@ -44,8 +71,7 @@ Configuration precedence (highest to lowest):
   "remotes": [
     {
       "type": "GitHub",
-      "url": "https://github.com",
-      "organizations": []
+      "host": "github.com"
     }
   ],
   "copy_patterns": [
@@ -133,7 +159,18 @@ wsmg config path
 
 # Edit configuration file
 wsmg config edit
+
+# Validate configuration
+wsmg config validate [--strict]
 ```
+
+The `validate` command checks:
+- Required fields (repos, workspaces)
+- Directory existence and permissions
+- Remote host formats
+- JSON syntax
+
+Use `--strict` flag to also check for unused keys in the configuration file.
 
 ### List Local Repositories
 
@@ -183,28 +220,94 @@ wsmg remote clone --interactive
 
 Clone remote repositories into the `repos` directory, maintaining the organization structure.
 
-### List Workspaces
+### Workspace Management
+
+#### List Workspaces
 
 ```bash
-wsmg workspace list
+wsmg workspace list [--format=table|json|yaml]
 ```
 
-Display a list of created workspaces.
+Display a list of created workspaces with repository information.
 
-### Create Workspace
+#### Show Workspace Details
 
 ```bash
+wsmg workspace show <workspace-name> [--format=table|json|yaml]
+```
+
+Display detailed information about a specific workspace, including:
+- Repository status (clean/dirty)
+- Current branch
+- Modified and untracked files count
+- Last commit information
+
+#### Create Workspace
+
+```bash
+# Interactive mode (default)
 wsmg workspace create <ticket-name>
+
+# With specific repositories
+wsmg workspace create <ticket-name> --repo=github.com/org/repo1 --repo=github.com/org/repo2
+
+# Copy uncommitted changes from original repository
+wsmg workspace create <ticket-name> --copy-uncommitted
 ```
 
 Create a workspace with the specified ticket name. Interactively select repositories, create working branches for each repository, and place them in the workspace directory using Git worktree.
 
 **Automatic Environment File Copying**: When creating a workspace, environment configuration files (`.env*`, `.tool-versions`, `.nvmrc`, etc.) are automatically copied from the source repository to the workspace. This enables seamless development without manual configuration setup.
 
-### Delete Workspace
+**Copy Uncommitted Changes**: Use `--copy-uncommitted` flag to copy modified and untracked files from the original repository to the new workspace. Useful when you've started working in the main repository and want to continue in a dedicated workspace.
+
+#### Add Repositories to Workspace
 
 ```bash
-wsmg workspace delete <ticket-name>
+# Interactive mode
+wsmg workspace add <workspace-name> --interactive
+
+# With specific repositories
+wsmg workspace add <workspace-name> --repo=github.com/org/repo3
+
+# Copy uncommitted changes
+wsmg workspace add <workspace-name> --repo=github.com/org/repo3 --copy-uncommitted
+```
+
+Add additional repositories to an existing workspace.
+
+#### Remove Repositories from Workspace
+
+```bash
+# Interactive mode
+wsmg workspace remove <workspace-name> --interactive
+
+# With specific repositories
+wsmg workspace remove <workspace-name> --repo=github.com/org/repo1
+
+# Force removal without confirmation
+wsmg workspace remove <workspace-name> --repo=github.com/org/repo1 --force
+```
+
+Remove repositories from a workspace. This will delete the worktree and update VSCode configuration.
+
+#### Rename Workspace
+
+```bash
+wsmg workspace rename <old-name> <new-name> [--force]
+```
+
+Rename a workspace, including:
+- Workspace directory
+- Git branches in all repositories
+- VSCode workspace file
+
+Branches matching the old workspace name will be renamed to the new name.
+
+#### Delete Workspace
+
+```bash
+wsmg workspace delete <workspace-name> [--force]
 ```
 
 Delete the specified workspace, including the removal of Git worktrees.

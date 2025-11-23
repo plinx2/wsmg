@@ -1,10 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
+	"path/filepath"
 
 	"github.com/plinx2/wsmg/internal/cli"
 	"github.com/plinx2/wsmg/internal/config"
@@ -12,23 +13,23 @@ import (
 	"github.com/spf13/viper"
 )
 
-func newConfigValidateCmd() *cobra.Command {
-	// オプション定義
-	opts := &struct {
-		Strict bool `flag:"strict" short:"s" default:"false" usage:"厳格なバリデーション（未使用キーなども警告）"`
-	}{}
+// ConfigValidateOptions represents options for config validate command
+type ConfigValidateOptions struct {
+	Strict bool `flag:"strict" short:"s" default:"false" usage:"Strict validation (warn about unused keys)"`
+}
 
-	// コマンド定義
+func newConfigValidateCmd() *cobra.Command {
+	opts := &ConfigValidateOptions{}
+
 	cmd := &cobra.Command{
 		Use:   "validate",
 		Short: "Validate configuration file",
-		Long:  `設定ファイルの妥当性を検証します。`,
+		Long:  `Validate the configuration file for syntax and content errors`,
 		RunE: func(c *cobra.Command, args []string) error {
-			return runConfigValidate(opts.Strict)
+			return runConfigValidate(c.Context(), opts)
 		},
 	}
 
-	// フラグ定義
 	if err := cli.BindFlags(cmd, opts); err != nil {
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
@@ -36,34 +37,36 @@ func newConfigValidateCmd() *cobra.Command {
 	return cmd
 }
 
-func runConfigValidate(strict bool) error {
+func runConfigValidate(ctx context.Context, opts *ConfigValidateOptions) error {
 	configFile := viper.ConfigFileUsed()
 
 	if configFile == "" {
-		return fmt.Errorf("設定ファイルが見つかりません")
+		return fmt.Errorf("config file not found")
 	}
 
-	// JSONの構文チェック
+	fmt.Printf("Validating configuration: %s\n\n", configFile)
+
+	// JSON syntax check
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		return fmt.Errorf("✗ 設定ファイルの読み込みに失敗しました: %w", err)
+		return fmt.Errorf("✗ failed to read config file: %w", err)
 	}
 
-	var rawConfig map[string]interface{}
+	var rawConfig map[string]any
 	if err := json.Unmarshal(data, &rawConfig); err != nil {
-		return fmt.Errorf("✗ JSON の構文エラー: %w", err)
+		return fmt.Errorf("✗ JSON syntax error: %w", err)
 	}
 
-	// 設定を読み込み
+	// Load configuration
 	cfg, err := config.GetConfig()
 	if err != nil {
-		return fmt.Errorf("✗ 設定の読み込みに失敗しました: %w", err)
+		return fmt.Errorf("✗ failed to load configuration: %w", err)
 	}
 
 	errors := []string{}
 	warnings := []string{}
 
-	// 必須キーのチェック
+	// Check required fields
 	if cfg.Repos == "" {
 		errors = append(errors, "repos: required field is missing")
 	}
@@ -71,14 +74,22 @@ func runConfigValidate(strict bool) error {
 		errors = append(errors, "workspaces: required field is missing")
 	}
 
-	// repos ディレクトリの存在チェック（警告のみ）
-	if _, err := os.Stat(cfg.Repos); os.IsNotExist(err) {
-		warnings = append(warnings, fmt.Sprintf("repos: directory does not exist: %s", cfg.Repos))
+	// Validate repos directory
+	if cfg.Repos != "" {
+		if err := validateDirectory(cfg.Repos, "repos"); err != nil {
+			errors = append(errors, err.Error())
+		} else if warn := checkDirectoryWarnings(cfg.Repos, "repos"); warn != "" {
+			warnings = append(warnings, warn)
+		}
 	}
 
-	// workspaces ディレクトリの存在チェック（警告のみ）
-	if _, err := os.Stat(cfg.Workspaces); os.IsNotExist(err) {
-		warnings = append(warnings, fmt.Sprintf("workspaces: directory does not exist: %s", cfg.Workspaces))
+	// Validate workspaces directory
+	if cfg.Workspaces != "" {
+		if err := validateDirectory(cfg.Workspaces, "workspaces"); err != nil {
+			errors = append(errors, err.Error())
+		} else if warn := checkDirectoryWarnings(cfg.Workspaces, "workspaces"); warn != "" {
+			warnings = append(warnings, warn)
+		}
 	}
 
 	// リモート設定のチェック
@@ -86,18 +97,13 @@ func runConfigValidate(strict bool) error {
 		if remote.Type == "" {
 			errors = append(errors, fmt.Sprintf("remotes.%d.type: required field is missing", i))
 		}
-		if remote.URL == "" {
-			errors = append(errors, fmt.Sprintf("remotes.%d.url: required field is missing", i))
-		} else {
-			// URL形式のチェック
-			if _, err := url.Parse(remote.URL); err != nil {
-				errors = append(errors, fmt.Sprintf("remotes.%d.url: invalid URL format", i))
-			}
+		if remote.Host == "" {
+			errors = append(errors, fmt.Sprintf("remotes.%d.host: required field is missing", i))
 		}
 	}
 
 	// 厳格モードの場合、既知のキー以外を警告
-	if strict {
+	if opts.Strict {
 		knownKeys := map[string]bool{
 			"repos":      true,
 			"workspaces": true,
@@ -129,4 +135,64 @@ func runConfigValidate(strict bool) error {
 	}
 
 	return nil
+}
+
+// validateDirectory validates a directory for existence and permissions
+func validateDirectory(path, name string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Directory doesn't exist, try to create it to check if path is valid
+			if err := os.MkdirAll(path, 0755); err != nil {
+				return fmt.Errorf("%s: cannot create directory: %w", name, err)
+			}
+			// Remove the test directory
+			os.Remove(path)
+			// Return nil as the path is valid (just doesn't exist yet)
+			return nil
+		}
+		return fmt.Errorf("%s: cannot access directory: %w", name, err)
+	}
+
+	if !info.IsDir() {
+		return fmt.Errorf("%s: path exists but is not a directory: %s", name, path)
+	}
+
+	// Check if directory is writable
+	testFile := filepath.Join(path, ".wsmg_test_write")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		return fmt.Errorf("%s: directory is not writable: %w", name, err)
+	}
+	os.Remove(testFile)
+
+	return nil
+}
+
+// checkDirectoryWarnings checks for directory warnings (non-fatal issues)
+func checkDirectoryWarnings(path, name string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Sprintf("%s: directory does not exist: %s (will be created on first use)", name, path)
+		}
+		return ""
+	}
+
+	// Check if directory is empty
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return ""
+	}
+
+	if len(entries) == 0 {
+		return fmt.Sprintf("%s: directory is empty: %s", name, path)
+	}
+
+	// Check disk space (Unix-like systems)
+	// Note: This is a basic check, more sophisticated checks could be added
+	if info.Mode().Perm()&0200 == 0 {
+		return fmt.Sprintf("%s: directory has restrictive permissions: %s", name, path)
+	}
+
+	return ""
 }

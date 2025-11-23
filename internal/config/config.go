@@ -26,7 +26,7 @@ type EnvEntry struct {
 // Remote represents a remote Git server configuration
 type Remote struct {
 	Type string `mapstructure:"type"`
-	URL  string `mapstructure:"url"`
+	Host string `mapstructure:"host"` // Hostname (e.g., "github.com", "my.gitserver.com")
 }
 
 // CacheConfig represents cache settings

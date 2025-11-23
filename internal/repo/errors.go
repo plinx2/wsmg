@@ -1,6 +1,21 @@
-package git
+package repo
 
 import "fmt"
+
+// GitCommandError はGitコマンドの実行エラーです
+type GitCommandError struct {
+	Command string
+	Output  string
+	Err     error
+}
+
+func (e *GitCommandError) Error() string {
+	return fmt.Sprintf("git command failed: %s\n%s\n%v", e.Command, e.Output, e.Err)
+}
+
+func (e *GitCommandError) Unwrap() error {
+	return e.Err
+}
 
 // NotRepositoryError はディレクトリがGitリポジトリでない場合のエラーです
 type NotRepositoryError struct {
@@ -18,19 +33,4 @@ type BranchNotFoundError struct {
 
 func (e *BranchNotFoundError) Error() string {
 	return fmt.Sprintf("branch not found: %s", e.Branch)
-}
-
-// GitCommandError はGitコマンドの実行エラーです
-type GitCommandError struct {
-	Command string
-	Output  string
-	Err     error
-}
-
-func (e *GitCommandError) Error() string {
-	return fmt.Sprintf("git command failed: %s\n%s\n%v", e.Command, e.Output, e.Err)
-}
-
-func (e *GitCommandError) Unwrap() error {
-	return e.Err
 }

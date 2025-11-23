@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,11 +11,14 @@ import (
 	"github.com/spf13/viper"
 )
 
+// ConfigPathOptions はコンフィグパス表示コマンドのオプションです
+type ConfigPathOptions struct {
+	Create bool `flag:"create" default:"false" usage:"パスが存在しない場合、ディレクトリを作成"`
+}
+
 func newConfigPathCmd() *cobra.Command {
 	// オプション定義
-	opts := &struct {
-		Create bool `flag:"create" default:"false" usage:"パスが存在しない場合、ディレクトリを作成"`
-	}{}
+	opts := &ConfigPathOptions{}
 
 	// コマンド定義
 	cmd := &cobra.Command{
@@ -22,7 +26,7 @@ func newConfigPathCmd() *cobra.Command {
 		Short: "Show configuration file path",
 		Long:  `設定ファイルのパスを表示します。スクリプトから設定ファイルにアクセスする際に便利です。`,
 		RunE: func(c *cobra.Command, args []string) error {
-			return runConfigPath(opts.Create)
+			return runConfigPath(c.Context(), opts)
 		},
 	}
 
@@ -34,7 +38,7 @@ func newConfigPathCmd() *cobra.Command {
 	return cmd
 }
 
-func runConfigPath(create bool) error {
+func runConfigPath(ctx context.Context, opts *ConfigPathOptions) error {
 	configFile := viper.ConfigFileUsed()
 
 	if configFile == "" {
@@ -47,7 +51,7 @@ func runConfigPath(create bool) error {
 	}
 
 	// ディレクトリを作成するオプションが指定されている場合
-	if create {
+	if opts.Create {
 		configDir := filepath.Dir(configFile)
 		if _, err := os.Stat(configDir); os.IsNotExist(err) {
 			if err := os.MkdirAll(configDir, 0755); err != nil {

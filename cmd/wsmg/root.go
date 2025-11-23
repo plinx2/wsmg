@@ -9,11 +9,19 @@ import (
 	"path/filepath"
 
 	"github.com/plinx2/wsmg/internal/config"
+	"github.com/plinx2/wsmg/internal/repo"
+	"github.com/plinx2/wsmg/internal/workspace"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var cfgFile string
+
+// Global clients initialized in PersistentPreRunE
+var (
+	workspaceClient *workspace.Client
+	repoClient      *repo.Client
+)
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -26,6 +34,32 @@ When working on tasks across multiple repositories, wsmg creates workspaces
 for each ticket and manages working branches using Git worktree. This eliminates
 the need for branch switching and stash management when working on multiple
 tickets in parallel.`,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Initialize clients if repos/workspaces directories are configured
+		reposDir := config.GetReposDir()
+		workspacesDir := config.GetWorkspacesDir()
+
+		// Skip client initialization for commands that don't need them (e.g., config commands)
+		if reposDir == "" || workspacesDir == "" {
+			return nil
+		}
+
+		// Initialize repo client
+		rc, err := repo.NewClient(reposDir)
+		if err != nil {
+			return fmt.Errorf("failed to initialize repo client: %w", err)
+		}
+		repoClient = rc
+
+		// Initialize workspace client
+		wc, err := workspace.NewClient(reposDir, workspacesDir)
+		if err != nil {
+			return fmt.Errorf("failed to initialize workspace client: %w", err)
+		}
+		workspaceClient = wc
+
+		return nil
+	},
 }
 
 func Execute() {
@@ -40,12 +74,12 @@ func init() {
 
 	// Configure global flags
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path (default: ~/.config/wsmg/wsmg.json)")
-	rootCmd.PersistentFlags().String("repos", "", "repos directory path")
-	rootCmd.PersistentFlags().String("workspaces", "", "workspaces directory path")
+	rootCmd.PersistentFlags().String("repos-dir", "", "repos directory path")
+	rootCmd.PersistentFlags().String("workspaces-dir", "", "workspaces directory path")
 
 	// Bind flags to viper
-	viper.BindPFlag("repos", rootCmd.PersistentFlags().Lookup("repos"))
-	viper.BindPFlag("workspaces", rootCmd.PersistentFlags().Lookup("workspaces"))
+	viper.BindPFlag("repos", rootCmd.PersistentFlags().Lookup("repos-dir"))
+	viper.BindPFlag("workspaces", rootCmd.PersistentFlags().Lookup("workspaces-dir"))
 
 	// Add version command
 	rootCmd.AddCommand(&cobra.Command{
@@ -55,6 +89,9 @@ func init() {
 			fmt.Printf("wsmg version %s\n", version)
 		},
 	})
+
+	// Register completion functions (will be called after client initialization)
+	cobra.OnInitialize(registerCompletions)
 }
 
 func initConfig() {
@@ -84,8 +121,8 @@ func initConfig() {
 	home, _ := os.UserHomeDir()
 	viper.SetDefault("repos", filepath.Join(home, "repos"))
 	viper.SetDefault("workspaces", filepath.Join(home, "workspaces"))
-	viper.SetDefault("env", []interface{}{})
-	viper.SetDefault("remotes", []interface{}{})
+	viper.SetDefault("env", []any{})
+	viper.SetDefault("remotes", []any{})
 
 	// Read config file
 	if err := viper.ReadInConfig(); err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,12 +13,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// WorkspaceListOptions represents options for workspace list command
+type WorkspaceListOptions struct {
+	Format  string `flag:"format" default:"table" usage:"Output format" choices:"table,json,yaml"`
+	Details bool   `flag:"details" short:"d" default:"false" usage:"Show detailed information"`
+}
+
 func newWorkspaceListCmd() *cobra.Command {
 	// Define options
-	opts := &struct {
-		Format  string `flag:"format" default:"table" usage:"Output format" choices:"table,json,yaml"`
-		Details bool   `flag:"details" short:"d" default:"false" usage:"Show detailed information"`
-	}{}
+	opts := &WorkspaceListOptions{}
 
 	// Define command
 	cmd := &cobra.Command{
@@ -25,7 +29,7 @@ func newWorkspaceListCmd() *cobra.Command {
 		Short: "List workspaces",
 		Long:  `Display a list of created workspaces.`,
 		RunE: func(c *cobra.Command, args []string) error {
-			return runWorkspaceList(opts.Format, opts.Details)
+			return runWorkspaceList(c.Context(), opts)
 		},
 	}
 
@@ -37,36 +41,36 @@ func newWorkspaceListCmd() *cobra.Command {
 	return cmd
 }
 
-func runWorkspaceList(format string, details bool) error {
+func runWorkspaceList(ctx context.Context, opts *WorkspaceListOptions) error {
 	workspacesDir := config.GetWorkspacesDir()
 
-	// ディレクトリの存在確認
+	// Check if directory exists
 	if _, err := os.Stat(workspacesDir); os.IsNotExist(err) {
-		fmt.Printf("workspaces ディレクトリが存在しません: %s\n", workspacesDir)
-		fmt.Println("ワークスペースを作成するには 'wsmg workspace create' を実行してください。")
+		fmt.Printf("workspaces directory does not exist: %s\n", workspacesDir)
+		fmt.Println("Run 'wsmg workspace create' to create a workspace.")
 		return nil
 	}
 
-	// ワークスペースを検索
-	workspaces, err := workspace.FindWorkspaces(workspacesDir)
+	// List workspaces
+	workspaces, err := workspaceClient.ListWorkspaces()
 	if err != nil {
-		return fmt.Errorf("ワークスペースの検索に失敗しました: %w", err)
+		return fmt.Errorf("failed to list workspaces: %w", err)
 	}
 
 	if len(workspaces) == 0 {
-		fmt.Println("ワークスペースが見つかりませんでした。")
-		fmt.Println("ワークスペースを作成するには 'wsmg workspace create <name>' を実行してください。")
+		fmt.Println("No workspaces found.")
+		fmt.Println("Run 'wsmg workspace create <name>' to create a workspace.")
 		return nil
 	}
 
-	// 出力
-	switch format {
+	// Output
+	switch opts.Format {
 	case "json":
-		return outputWorkspaceJSON(workspaces, details)
+		return outputWorkspaceJSON(workspaces, opts.Details)
 	case "yaml":
-		return outputWorkspaceYAML(workspaces, details)
+		return outputWorkspaceYAML(workspaces, opts.Details)
 	default:
-		return outputWorkspaceTable(workspaces, details)
+		return outputWorkspaceTable(workspaces, opts.Details)
 	}
 }
 
@@ -74,7 +78,7 @@ func outputWorkspaceTable(workspaces []*workspace.Workspace, details bool) error
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer w.Flush()
 
-	// ヘッダー
+	// Header
 	if details {
 		fmt.Fprintln(w, "NAME\tREPOSITORIES\tLAST MODIFIED\tPATH")
 		fmt.Fprintln(w, "----\t------------\t-------------\t----")
@@ -83,7 +87,7 @@ func outputWorkspaceTable(workspaces []*workspace.Workspace, details bool) error
 		fmt.Fprintln(w, "----\t------------\t-------------")
 	}
 
-	// データ行
+	// Data rows
 	for _, ws := range workspaces {
 		timeStr := ws.Modified.Format("2006-01-02 15:04")
 		repoCount := len(ws.Repositories)
@@ -103,10 +107,11 @@ func outputWorkspaceTable(workspaces []*workspace.Workspace, details bool) error
 			)
 		}
 
-		// 詳細モードの場合、含まれるリポジトリを表示
+		// In details mode, show repositories included in the workspace
 		if details && repoCount > 0 {
-			for _, repo := range ws.Repositories {
-				fmt.Fprintf(w, "  └─ %s\t(%s)\t\t\n", repo.Name, repo.Branch)
+			for _, r := range ws.Repositories {
+				branch, _ := r.Branch()
+				fmt.Fprintf(w, "  └─ %s\t(%s)\t\t\n", r.Name(), branch)
 			}
 		}
 	}
@@ -117,12 +122,18 @@ func outputWorkspaceTable(workspaces []*workspace.Workspace, details bool) error
 }
 
 func outputWorkspaceJSON(workspaces []*workspace.Workspace, details bool) error {
+	type RepoInfo struct {
+		Name   string `json:"name"`
+		Path   string `json:"path"`
+		Branch string `json:"branch"`
+	}
+
 	type WorkspaceJSON struct {
-		Name         string                        `json:"name"`
-		Path         string                        `json:"path"`
-		Repositories []workspace.RepositoryInfo    `json:"repositories,omitempty"`
-		RepoCount    int                           `json:"repositoryCount"`
-		Modified     string                        `json:"lastModified"`
+		Name         string     `json:"name"`
+		Path         string     `json:"path"`
+		Repositories []RepoInfo `json:"repositories,omitempty"`
+		RepoCount    int        `json:"repositoryCount"`
+		Modified     string     `json:"lastModified"`
 	}
 
 	var output []WorkspaceJSON
@@ -135,7 +146,14 @@ func outputWorkspaceJSON(workspaces []*workspace.Workspace, details bool) error 
 		}
 
 		if details {
-			item.Repositories = ws.Repositories
+			for _, r := range ws.Repositories {
+				branch, _ := r.Branch()
+				item.Repositories = append(item.Repositories, RepoInfo{
+					Name:   r.Name(),
+					Path:   r.Path(),
+					Branch: branch,
+				})
+			}
 		}
 
 		output = append(output, item)
@@ -156,10 +174,11 @@ func outputWorkspaceYAML(workspaces []*workspace.Workspace, details bool) error 
 
 		if details && len(ws.Repositories) > 0 {
 			fmt.Println("    repositories:")
-			for _, repo := range ws.Repositories {
-				fmt.Printf("      - name: %s\n", repo.Name)
-				fmt.Printf("        branch: %s\n", repo.Branch)
-				fmt.Printf("        path: %s\n", repo.RelativePath)
+			for _, r := range ws.Repositories {
+				branch, _ := r.Branch()
+				fmt.Printf("      - name: %s\n", r.Name())
+				fmt.Printf("        branch: %s\n", branch)
+				fmt.Printf("        path: %s\n", r.Path())
 			}
 		}
 	}

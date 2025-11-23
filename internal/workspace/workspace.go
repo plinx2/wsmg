@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,249 +9,176 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/plinx2/wsmg/internal/repo"
 )
 
-// Workspace はワークスペースを表します
+// Workspace represents a workspace
 type Workspace struct {
-	Name         string           // ワークスペース名（チケット名）
-	Path         string           // ワークスペースのパス
-	Repositories []RepositoryInfo // 含まれるリポジトリ
-	Created      time.Time        // 作成日時
-	Modified     time.Time        // 最終更新日時
+	Name         string        // Workspace name (ticket name)
+	Path         string        // Workspace path
+	Repositories []*repo.Local // Repositories in the workspace
+	Created      time.Time     // Creation time
+	Modified     time.Time     // Last modified time
 }
 
-// RepositoryInfo はワークスペース内のリポジトリ情報を表します
-type RepositoryInfo struct {
-	Name         string // リポジトリ名
-	RelativePath string // ワークスペースからの相対パス
-	Branch       string // ブランチ名
+// vscodeWorkspace represents VSCode workspace configuration
+type vscodeWorkspace struct {
+	Folders  []vscodeFolder `json:"folders"`
+	Settings map[string]any `json:"settings,omitempty"`
 }
 
-// FindWorkspaces は指定されたディレクトリ配下のワークスペースを検索します
-func FindWorkspaces(workspacesDir string) ([]*Workspace, error) {
-	entries, err := os.ReadDir(workspacesDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []*Workspace{}, nil
-		}
-		return nil, err
-	}
-
-	var workspaces []*Workspace
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		workspacePath := filepath.Join(workspacesDir, entry.Name())
-		ws, err := GetWorkspaceInfo(workspacePath, entry.Name())
-		if err != nil {
-			// エラーは無視してスキップ
-			continue
-		}
-
-		workspaces = append(workspaces, ws)
-	}
-
-	return workspaces, nil
-}
-
-// GetWorkspaceInfo はワークスペースの情報を取得します
-func GetWorkspaceInfo(workspacePath, name string) (*Workspace, error) {
-	info, err := os.Stat(workspacePath)
-	if err != nil {
-		return nil, err
-	}
-
-	ws := &Workspace{
-		Name:     name,
-		Path:     workspacePath,
-		Created:  info.ModTime(), // 簡易的に修正日時を使用
-		Modified: info.ModTime(),
-	}
-
-	// ワークスペース内のリポジトリを検索
-	repos, err := findRepositoriesInWorkspace(workspacePath)
-	if err == nil {
-		ws.Repositories = repos
-	}
-
-	return ws, nil
-}
-
-// findRepositoriesInWorkspace はワークスペース内のリポジトリを検索します
-func findRepositoriesInWorkspace(workspacePath string) ([]RepositoryInfo, error) {
-	var repos []RepositoryInfo
-
-	err := filepath.Walk(workspacePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // エラーは無視
-		}
-
-		// .git を見つけたらリポジトリとして認識（ディレクトリまたはファイル）
-		if info.Name() == ".git" {
-			repoPath := filepath.Dir(path)
-			relPath, err := filepath.Rel(workspacePath, repoPath)
-			if err != nil {
-				return nil
-			}
-
-			// ブランチ名を取得
-			branch := getCurrentBranchFromGit(path, info.IsDir())
-
-			repos = append(repos, RepositoryInfo{
-				Name:         filepath.Base(repoPath),
-				RelativePath: relPath,
-				Branch:       branch,
-			})
-
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-		}
-
-		return nil
-	})
-
-	return repos, err
-}
-
-// getCurrentBranchFromGit は.gitからブランチ名を取得します
-func getCurrentBranchFromGit(gitPath string, isDir bool) string {
-	var headFile string
-
-	if isDir {
-		// 通常のリポジトリ
-		headFile = filepath.Join(gitPath, "HEAD")
-	} else {
-		// worktreeの場合、.gitファイルの内容を読んで実際のHEADを見つける
-		data, err := os.ReadFile(gitPath)
-		if err != nil {
-			return ""
-		}
-
-		// "gitdir: /path/to/.git/worktrees/xxx" の形式
-		content := strings.TrimSpace(string(data))
-		if strings.HasPrefix(content, "gitdir: ") {
-			gitdir := strings.TrimPrefix(content, "gitdir: ")
-			headFile = filepath.Join(gitdir, "HEAD")
-		} else {
-			return ""
-		}
-	}
-
-	// HEADファイルを読む
-	data, err := os.ReadFile(headFile)
-	if err != nil {
-		return ""
-	}
-
-	// "ref: refs/heads/main" -> "main"
-	head := strings.TrimSpace(string(data))
-	if strings.HasPrefix(head, "ref: refs/heads/") {
-		return strings.TrimPrefix(head, "ref: refs/heads/")
-	}
-
-	return ""
-}
-
-// VSCodeWorkspace はVSCodeのワークスペース設定を表します
-type VSCodeWorkspace struct {
-	Folders  []VSCodeFolder         `json:"folders"`
-	Settings map[string]interface{} `json:"settings,omitempty"`
-}
-
-// VSCodeFolder はVSCodeのフォルダ設定を表します
-type VSCodeFolder struct {
+// vscodeFolder represents a folder in VSCode workspace
+type vscodeFolder struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 }
 
-// GenerateVSCodeWorkspace はVSCodeワークスペースファイルを生成します
-func GenerateVSCodeWorkspace(workspacePath, workspaceName string, repos []RepositoryInfo) error {
-	workspace := VSCodeWorkspace{
-		Folders: make([]VSCodeFolder, 0, len(repos)),
-		Settings: map[string]interface{}{
-			"files.exclude": map[string]bool{
-				"**/.git": true,
-			},
-		},
-	}
-
-	// リポジトリをフォルダとして追加
-	for _, repo := range repos {
-		workspace.Folders = append(workspace.Folders, VSCodeFolder{
-			Name: repo.Name,
-			Path: repo.RelativePath,
-		})
-	}
-
-	// JSONファイルとして保存
+// generateVSCodeWorkspace generates or updates VSCode workspace file
+func (c *Client) generateVSCodeWorkspace(workspacePath, workspaceName string, repos []*repo.Local) error {
 	workspaceFile := filepath.Join(workspacePath, workspaceName+".code-workspace")
+
+	// Load existing workspace file if it exists
+	var workspace vscodeWorkspace
+	if data, err := os.ReadFile(workspaceFile); err == nil {
+		// Existing workspace file found, load it
+		if err := json.Unmarshal(data, &workspace); err != nil {
+			// If unmarshal fails, start fresh
+			workspace = vscodeWorkspace{
+				Folders:  make([]vscodeFolder, 0, len(repos)+1),
+				Settings: map[string]any{},
+			}
+		}
+	} else {
+		// No existing file, create new
+		workspace = vscodeWorkspace{
+			Folders:  make([]vscodeFolder, 0, len(repos)+1),
+			Settings: map[string]any{},
+		}
+	}
+
+	// Build map of existing folders for deduplication
+	existingFolders := make(map[string]vscodeFolder)
+	for _, folder := range workspace.Folders {
+		existingFolders[folder.Path] = folder
+	}
+
+	// Ensure workspace root folder exists (for CURSOR.md, README.md, etc.)
+	if _, exists := existingFolders["."]; !exists {
+		workspace.Folders = append([]vscodeFolder{{
+			Name: workspaceName,
+			Path: ".",
+		}}, workspace.Folders...)
+	}
+
+	// Add or update repository folders
+	for _, r := range repos {
+		relPath, err := filepath.Rel(workspacePath, r.Path())
+		if err != nil {
+			continue
+		}
+		if _, exists := existingFolders[relPath]; !exists {
+			workspace.Folders = append(workspace.Folders, vscodeFolder{
+				Name: r.Name(),
+				Path: relPath,
+			})
+		}
+	}
+
+	// Save workspace file
 	data, err := json.MarshalIndent(workspace, "", "  ")
 	if err != nil {
-		return fmt.Errorf("JSONの生成に失敗しました: %w", err)
+		return fmt.Errorf("failed to generate JSON: %w", err)
 	}
 
 	if err := os.WriteFile(workspaceFile, data, 0644); err != nil {
-		return fmt.Errorf("ワークスペースファイルの書き込みに失敗しました: %w", err)
+		return fmt.Errorf("failed to write workspace file: %w", err)
+	}
+
+	// Update .vscode/settings.json
+	if err := c.updateVSCodeSettings(workspacePath, repos); err != nil {
+		return fmt.Errorf("failed to update VSCode settings: %w", err)
 	}
 
 	return nil
 }
 
-// WorkspaceExists はワークスペースが存在するかチェックします
-func WorkspaceExists(workspacesDir, name string) bool {
-	workspacePath := filepath.Join(workspacesDir, name)
-	info, err := os.Stat(workspacePath)
+// updateVSCodeSettings updates .vscode/settings.json to hide repositories from root folder
+func (c *Client) updateVSCodeSettings(workspacePath string, repos []*repo.Local) error {
+	vscodeDir := filepath.Join(workspacePath, ".vscode")
+	if err := os.MkdirAll(vscodeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .vscode directory: %w", err)
+	}
+
+	settingsFile := filepath.Join(vscodeDir, "settings.json")
+
+	// Load existing settings if they exist
+	var settings map[string]any
+	if data, err := os.ReadFile(settingsFile); err == nil {
+		// Existing settings found, load them
+		if err := json.Unmarshal(data, &settings); err != nil {
+			// If unmarshal fails, start fresh
+			settings = make(map[string]any)
+		}
+	} else {
+		// No existing file, create new
+		settings = make(map[string]any)
+	}
+
+	// Get or create files.exclude section
+	var filesExclude map[string]any
+	if existingExclude, ok := settings["files.exclude"].(map[string]any); ok {
+		filesExclude = existingExclude
+	} else {
+		filesExclude = make(map[string]any)
+	}
+
+	// Add repository directories to files.exclude
+	// This hides them from the workspace root folder view
+	for _, r := range repos {
+		relPath, err := filepath.Rel(workspacePath, r.Path())
+		if err != nil {
+			continue
+		}
+		filesExclude[relPath] = true
+	}
+
+	// Update files.exclude in settings
+	settings["files.exclude"] = filesExclude
+
+	// Save settings file with proper formatting
+	settingsData, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
-		return false
+		return fmt.Errorf("failed to generate settings JSON: %w", err)
 	}
-	return info.IsDir()
-}
 
-// CreateWorkspaceDir はワークスペースディレクトリを作成します
-func CreateWorkspaceDir(workspacesDir, name string) (string, error) {
-	workspacePath := filepath.Join(workspacesDir, name)
-	if err := os.MkdirAll(workspacePath, 0755); err != nil {
-		return "", fmt.Errorf("ワークスペースディレクトリの作成に失敗しました: %w", err)
+	if err := os.WriteFile(settingsFile, settingsData, 0644); err != nil {
+		return fmt.Errorf("failed to write settings file: %w", err)
 	}
-	return workspacePath, nil
-}
 
-// DeleteWorkspace はワークスペースを削除します
-func DeleteWorkspace(workspacePath string) error {
-	if err := os.RemoveAll(workspacePath); err != nil {
-		return fmt.Errorf("ワークスペースの削除に失敗しました: %w", err)
-	}
 	return nil
 }
 
-// CopyEnvironmentFiles は指定されたパターンに一致するファイル・ディレクトリを
-// 元のリポジトリから worktree にコピーします
-// パターンはプロジェクトルートからの相対パスに対してマッチングされます
-func CopyEnvironmentFiles(sourceRepo, targetWorktree string, patterns []string) ([]string, error) {
+// copyEnvironmentFiles copies files matching specified patterns from source to target
+func (c *Client) copyEnvironmentFiles(sourceRepo, targetWorktree string, patterns []string) ([]string, error) {
 	var copiedFiles []string
-	copiedPaths := make(map[string]bool) // 重複を避けるため
+	copiedPaths := make(map[string]bool)
 
-	// ルートディレクトリから再帰的にスキャン（最大深さ3まで）
 	err := filepath.Walk(sourceRepo, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // エラーは無視して続行
+			return nil
 		}
 
-		// ルートディレクトリ自体はスキップ
 		if path == sourceRepo {
 			return nil
 		}
 
-		// 相対パスを取得
 		relPath, err := filepath.Rel(sourceRepo, path)
 		if err != nil {
 			return nil
 		}
 
-		// 深さをチェック（最大3階層まで）
+		// Limit to 3 levels deep
 		depth := strings.Count(relPath, string(filepath.Separator))
 		if depth > 3 {
 			if info.IsDir() {
@@ -259,40 +187,34 @@ func CopyEnvironmentFiles(sourceRepo, targetWorktree string, patterns []string) 
 			return nil
 		}
 
-		// .git ディレクトリはスキップ
+		// Skip .git directory
 		if info.IsDir() && info.Name() == ".git" {
 			return filepath.SkipDir
 		}
 
-		// パターンにマッチするかチェック
-		if !matchesAnyPattern(relPath, patterns) {
+		// Check if matches any pattern
+		if !matchesPattern(relPath, patterns) {
 			return nil
 		}
 
-		// 既にコピー済みのパスはスキップ
 		if copiedPaths[relPath] {
 			return nil
 		}
 
-		// コピー先のパス
 		targetPath := filepath.Join(targetWorktree, relPath)
 
 		if info.IsDir() {
-			// ディレクトリの場合は作成
 			if err := os.MkdirAll(targetPath, info.Mode()); err != nil {
-				return nil // エラーは無視
+				return nil
 			}
 			copiedFiles = append(copiedFiles, relPath+"/")
 			copiedPaths[relPath] = true
 		} else {
-			// ファイルの場合はコピー
-			// 親ディレクトリを作成
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-				return nil // エラーは無視
+				return nil
 			}
-
 			if err := copyFile(path, targetPath); err != nil {
-				return nil // エラーは無視
+				return nil
 			}
 			copiedFiles = append(copiedFiles, relPath)
 			copiedPaths[relPath] = true
@@ -302,36 +224,35 @@ func CopyEnvironmentFiles(sourceRepo, targetWorktree string, patterns []string) 
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("ファイルのスキャンに失敗しました: %w", err)
+		return nil, fmt.Errorf("failed to scan files: %w", err)
 	}
 
 	return copiedFiles, nil
 }
 
-// matchesAnyPattern は相対パスが指定されたパターンのいずれかに一致するかチェックします
-// ワイルドカード (*) をサポートします
-func matchesAnyPattern(relPath string, patterns []string) bool {
-	// パス区切り文字を正規化（Windows対応）
+// matchesPattern checks if the relative path matches any of the specified patterns
+func matchesPattern(relPath string, patterns []string) bool {
+	// Normalize path separator (Windows support)
 	relPath = filepath.ToSlash(relPath)
 
 	for _, pattern := range patterns {
-		// パターンも正規化
+		// Normalize pattern
 		pattern = filepath.ToSlash(pattern)
 
-		// ディレクトリパターン (例: .vscode/*)
+		// Directory pattern (e.g., .vscode/*)
 		if strings.HasSuffix(pattern, "/*") {
 			prefix := strings.TrimSuffix(pattern, "/*")
-			// .vscode/* は .vscode/settings.json などにマッチ
+			// .vscode/* matches .vscode/settings.json, etc.
 			if relPath == prefix || strings.HasPrefix(relPath, prefix+"/") {
 				return true
 			}
 			continue
 		}
 
-		// ワイルドカードパターンマッチング
+		// Wildcard pattern matching
 		matched, err := filepath.Match(pattern, relPath)
 		if err != nil {
-			// パターンエラーの場合は完全一致で試す
+			// On pattern error, try exact match
 			if relPath == pattern {
 				return true
 			}
@@ -342,7 +263,7 @@ func matchesAnyPattern(relPath string, patterns []string) bool {
 			return true
 		}
 
-		// basename だけでもマッチングを試す（後方互換性のため）
+		// Also try matching basename (for backward compatibility)
 		basename := filepath.Base(relPath)
 		matched, err = filepath.Match(pattern, basename)
 		if err == nil && matched {
@@ -352,7 +273,7 @@ func matchesAnyPattern(relPath string, patterns []string) bool {
 	return false
 }
 
-// copyFile はファイルをコピーします
+// copyFile copies a file from src to dst (private helper)
 func copyFile(src, dst string) error {
 	sourceFile, err := os.Open(src)
 	if err != nil {
@@ -360,7 +281,7 @@ func copyFile(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
-	// ファイル情報を取得してパーミッションを保持
+	// Get file info to preserve permissions
 	sourceInfo, err := sourceFile.Stat()
 	if err != nil {
 		return err
@@ -372,15 +293,618 @@ func copyFile(src, dst string) error {
 	}
 	defer destFile.Close()
 
-	// ファイルをコピー
+	// Copy file
 	if _, err := io.Copy(destFile, sourceFile); err != nil {
 		return err
 	}
 
-	// パーミッションを設定
+	// Set permissions
 	if err := os.Chmod(dst, sourceInfo.Mode()); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// Client manages workspace operations
+type Client struct {
+	reposDir      string
+	workspacesDir string
+	repoClient    *repo.Client
+}
+
+// NewClient creates a new workspace client
+func NewClient(reposDir, workspacesDir string) (*Client, error) {
+	// Check if repos directory exists
+	if _, err := os.Stat(reposDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("repositories directory does not exist: %s", reposDir)
+		}
+		return nil, fmt.Errorf("failed to stat repositories directory: %w", err)
+	}
+
+	// Create repo client
+	repoClient, err := repo.NewClient(reposDir)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Client{
+		reposDir:      reposDir,
+		workspacesDir: workspacesDir,
+		repoClient:    repoClient,
+	}, nil
+}
+
+// CreateWorkspaceInput contains input parameters for workspace creation
+type CreateWorkspaceInput struct {
+	Name            string
+	RepoNames       []string
+	BaseBranch      string
+	CopyPatterns    []string
+	NoVSCode        bool
+	CopyUncommitted bool
+}
+
+// CreateWorkspaceResult contains the result of workspace creation
+type CreateWorkspaceResult struct {
+	WorkspacePath          string
+	SuccessCount           int
+	ErrorCount             int
+	Repos                  []*repo.Local
+	UncommittedFilesCopied int
+}
+
+// CreateWorkspace creates a new workspace
+func (c *Client) CreateWorkspace(ctx context.Context, input CreateWorkspaceInput) (*CreateWorkspaceResult, error) {
+	workspacePath := filepath.Join(c.workspacesDir, input.Name)
+
+	// Check if workspace already exists
+	if _, err := os.Stat(workspacePath); err == nil {
+		return nil, fmt.Errorf("workspace '%s' already exists", input.Name)
+	}
+
+	// Find all repositories
+	allRepos, err := c.repoClient.List(repo.ListInput{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to find repositories: %w", err)
+	}
+
+	if len(allRepos) == 0 {
+		return nil, fmt.Errorf("no repositories found")
+	}
+
+	// Filter repositories by names
+	var selectedRepos []*repo.Local
+	if len(input.RepoNames) > 0 {
+		for _, r := range allRepos {
+			relPath := r.RelativePath(c.reposDir)
+			for _, name := range input.RepoNames {
+				if strings.Contains(relPath, name) || strings.Contains(r.Name(), name) {
+					selectedRepos = append(selectedRepos, r)
+					break
+				}
+			}
+		}
+		if len(selectedRepos) == 0 {
+			return nil, fmt.Errorf("specified repositories not found")
+		}
+	} else {
+		selectedRepos = allRepos
+	}
+
+	// Create workspace directory
+	if err := os.MkdirAll(workspacePath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create workspace directory: %w", err)
+	}
+
+	result := &CreateWorkspaceResult{
+		WorkspacePath: workspacePath,
+		Repos:         []*repo.Local{},
+	}
+
+	// Create worktrees for each repository
+	for _, r := range selectedRepos {
+		relPath := r.RelativePath(c.reposDir)
+		worktreePath := filepath.Join(workspacePath, relPath)
+
+		currentBranch, err := r.Branch()
+		if err != nil {
+			return nil, err
+		}
+
+		base := currentBranch
+		if input.BaseBranch != "" && base != input.BaseBranch {
+			base = input.BaseBranch
+		}
+
+		if err := r.AddWorktree(worktreePath, input.Name, base); err != nil {
+			return nil, err
+		}
+
+		result.SuccessCount++
+
+		// Copy environment files
+		if len(input.CopyPatterns) > 0 {
+			c.copyEnvironmentFiles(r.Path(), worktreePath, input.CopyPatterns)
+		}
+
+		// Copy uncommitted changes and untracked files if requested
+		if input.CopyUncommitted {
+			copiedCount, err := c.copyUncommittedFiles(r, worktreePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to copy uncommitted files for %s: %v\n", r.Name(), err)
+			} else if copiedCount > 0 {
+				result.UncommittedFilesCopied += copiedCount
+			}
+		}
+
+		// Add worktree to result
+		worktreeRepo, err := repo.NewLocal(worktreePath)
+		if err == nil {
+			result.Repos = append(result.Repos, worktreeRepo)
+		}
+	}
+
+	// Generate VSCode workspace file and .vscode/settings.json
+	if !input.NoVSCode && len(result.Repos) > 0 {
+		if err := c.generateVSCodeWorkspace(workspacePath, input.Name, result.Repos); err != nil {
+			// VSCode workspace file generation error is not critical
+			fmt.Fprintf(os.Stderr, "Warning: failed to generate VSCode workspace file: %v\n", err)
+		}
+	}
+
+	return result, nil
+}
+
+// AddRepositoriesToWorkspace adds repositories to an existing workspace
+func (c *Client) AddRepositoriesToWorkspace(workspaceName string, repoNames []string, copyUncommitted bool) (int, error) {
+	workspacePath := filepath.Join(c.workspacesDir, workspaceName)
+
+	// Check if workspace exists
+	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
+		return 0, fmt.Errorf("workspace '%s' does not exist", workspaceName)
+	}
+
+	// Get existing workspace information
+	ws, err := c.GetWorkspace(workspaceName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get workspace info: %w", err)
+	}
+
+	// Find all repositories
+	allRepos, err := c.repoClient.List(repo.ListInput{})
+	if err != nil {
+		return 0, fmt.Errorf("failed to find repositories: %w", err)
+	}
+
+	if len(allRepos) == 0 {
+		return 0, fmt.Errorf("no repositories found")
+	}
+
+	// Filter repositories by names
+	var selectedRepos []*repo.Local
+	existingPaths := make(map[string]bool)
+	for _, r := range ws.Repositories {
+		existingPaths[r.Path()] = true
+	}
+
+	for _, r := range allRepos {
+		// Skip if repository already exists in workspace
+		relPath := r.RelativePath(c.reposDir)
+		worktreePath := filepath.Join(workspacePath, relPath)
+		if existingPaths[worktreePath] {
+			continue
+		}
+
+		// Check if repository name matches
+		for _, name := range repoNames {
+			if strings.Contains(relPath, name) || strings.Contains(r.Name(), name) {
+				selectedRepos = append(selectedRepos, r)
+				break
+			}
+		}
+	}
+
+	if len(selectedRepos) == 0 {
+		return 0, fmt.Errorf("no new repositories to add")
+	}
+
+	// Determine the branch name from existing repositories
+	var branchName string
+	if len(ws.Repositories) > 0 {
+		// Use the branch name from the first existing repository
+		branchName, err = ws.Repositories[0].Branch()
+		if err != nil {
+			// Fallback to workspace name
+			branchName = workspaceName
+		}
+	} else {
+		branchName = workspaceName
+	}
+
+	// Create worktrees for new repositories
+	var addedRepos []*repo.Local
+	uncommittedFilesCopied := 0
+	for _, r := range selectedRepos {
+		relPath := r.RelativePath(c.reposDir)
+		worktreePath := filepath.Join(workspacePath, relPath)
+
+		// Determine base branch
+		base, err := r.DefaultBranch()
+		if err != nil {
+			currentBranch, err := r.Branch()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to get branch for %s: %v\n", r.Name(), err)
+				continue
+			}
+			base = currentBranch
+		}
+
+		// Create worktree
+		if err := r.AddWorktree(worktreePath, branchName, base); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to create worktree for %s: %v\n", r.Name(), err)
+			continue
+		}
+
+		// Copy uncommitted changes and untracked files if requested
+		if copyUncommitted {
+			copiedCount, err := c.copyUncommittedFiles(r, worktreePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to copy uncommitted files for %s: %v\n", r.Name(), err)
+			} else if copiedCount > 0 {
+				uncommittedFilesCopied += copiedCount
+			}
+		}
+
+		// Add worktree to result
+		worktreeRepo, err := repo.NewLocal(worktreePath)
+		if err == nil {
+			addedRepos = append(addedRepos, worktreeRepo)
+		}
+	}
+
+	if len(addedRepos) == 0 {
+		return 0, fmt.Errorf("failed to add any repositories")
+	}
+
+	// Update VSCode workspace file and .vscode/settings.json
+	// This will merge with existing configuration
+	allReposInWorkspace := append(ws.Repositories, addedRepos...)
+	if err := c.generateVSCodeWorkspace(workspacePath, workspaceName, allReposInWorkspace); err != nil {
+		// VSCode workspace file generation error is not critical
+		fmt.Fprintf(os.Stderr, "Warning: failed to update VSCode workspace file: %v\n", err)
+	}
+
+	return uncommittedFilesCopied, nil
+}
+
+// RemoveRepositoriesFromWorkspace removes repositories from an existing workspace
+func (c *Client) RemoveRepositoriesFromWorkspace(workspaceName string, repoRelPaths []string, force bool) (int, error) {
+	workspacePath := filepath.Join(c.workspacesDir, workspaceName)
+
+	// Check if workspace exists
+	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
+		return 0, fmt.Errorf("workspace '%s' does not exist", workspaceName)
+	}
+
+	// Get existing workspace information
+	ws, err := c.GetWorkspace(workspaceName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get workspace info: %w", err)
+	}
+
+	if len(ws.Repositories) == 0 {
+		return 0, fmt.Errorf("workspace has no repositories")
+	}
+
+	// Build map of repositories to remove
+	toRemove := make(map[string]bool)
+	for _, relPath := range repoRelPaths {
+		toRemove[relPath] = true
+	}
+
+	// Find and remove repositories
+	var remainingRepos []*repo.Local
+	removedCount := 0
+
+	for _, r := range ws.Repositories {
+		relPath := r.RelativePath(c.reposDir)
+		absPath := r.Path()
+
+		if toRemove[relPath] || toRemove[absPath] {
+			// Remove worktree
+			original, err := r.Original()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to get original repository for %s: %v\n", r.Name(), err)
+				continue
+			}
+
+			if err := original.RemoveWorktree(r.Path(), force); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree for %s: %v\n", r.Name(), err)
+				continue
+			}
+
+			// Remove directory
+			if err := os.RemoveAll(r.Path()); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to remove directory %s: %v\n", r.Path(), err)
+				continue
+			}
+
+			removedCount++
+		} else {
+			// Repository should remain
+			remainingRepos = append(remainingRepos, r)
+		}
+	}
+
+	if removedCount == 0 {
+		return 0, fmt.Errorf("no matching repositories found to remove")
+	}
+
+	// Update VSCode workspace file and .vscode/settings.json
+	if err := c.generateVSCodeWorkspace(workspacePath, workspaceName, remainingRepos); err != nil {
+		// VSCode workspace file generation error is not critical
+		fmt.Fprintf(os.Stderr, "Warning: failed to update VSCode workspace file: %v\n", err)
+	}
+
+	return removedCount, nil
+}
+
+// RenameWorkspace renames a workspace, including directory, branches, and VSCode files
+func (c *Client) RenameWorkspace(oldName, newName string) error {
+	oldPath := filepath.Join(c.workspacesDir, oldName)
+	newPath := filepath.Join(c.workspacesDir, newName)
+
+	// Check if old workspace exists
+	if _, err := os.Stat(oldPath); os.IsNotExist(err) {
+		return fmt.Errorf("workspace '%s' does not exist", oldName)
+	}
+
+	// Check if new workspace already exists
+	if _, err := os.Stat(newPath); err == nil {
+		return fmt.Errorf("workspace '%s' already exists", newName)
+	}
+
+	// Get workspace info
+	ws, err := c.GetWorkspace(oldName)
+	if err != nil {
+		return fmt.Errorf("failed to get workspace info: %w", err)
+	}
+
+	// Rename branches in all repositories
+	for _, r := range ws.Repositories {
+		currentBranch, err := r.Branch()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to get branch for %s: %v\n", r.Name(), err)
+			continue
+		}
+
+		// Only rename if the branch name matches the old workspace name
+		if currentBranch == oldName {
+			// Create new branch from current branch
+			if err := r.CreateBranch(newName, currentBranch); err != nil {
+				return fmt.Errorf("failed to create new branch '%s' in %s: %w", newName, r.Name(), err)
+			}
+
+			// Checkout new branch
+			if err := r.CheckoutBranch(newName); err != nil {
+				return fmt.Errorf("failed to checkout new branch in %s: %w", r.Name(), err)
+			}
+
+			// Delete old branch
+			if err := r.DeleteBranch(currentBranch); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to delete old branch '%s' in %s: %v\n", currentBranch, r.Name(), err)
+			}
+		}
+	}
+
+	// Rename workspace directory
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return fmt.Errorf("failed to rename workspace directory: %w", err)
+	}
+
+	// Get updated repository list with new paths
+	updatedRepos := make([]*repo.Local, 0, len(ws.Repositories))
+	for _, r := range ws.Repositories {
+		// Calculate new path
+		relPath := r.RelativePath(oldPath)
+		newRepoPath := filepath.Join(newPath, relPath)
+
+		// Create new Local instance with updated path
+		updatedRepo, err := repo.NewLocal(newRepoPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load repository at %s: %v\n", newRepoPath, err)
+			continue
+		}
+		updatedRepos = append(updatedRepos, updatedRepo)
+	}
+
+	// Remove old VSCode workspace file
+	oldWorkspaceFile := filepath.Join(newPath, oldName+".code-workspace")
+	if err := os.Remove(oldWorkspaceFile); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Warning: failed to remove old workspace file: %v\n", err)
+	}
+
+	// Generate new VSCode workspace file
+	if err := c.generateVSCodeWorkspace(newPath, newName, updatedRepos); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to generate new VSCode workspace file: %v\n", err)
+	}
+
+	return nil
+}
+
+// ListWorkspaces lists all workspaces
+func (c *Client) ListWorkspaces() ([]*Workspace, error) {
+	entries, err := os.ReadDir(c.workspacesDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []*Workspace{}, nil
+		}
+		return nil, err
+	}
+
+	// Filter directory entries
+	var dirNames []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirNames = append(dirNames, entry.Name())
+		}
+	}
+
+	if len(dirNames) == 0 {
+		return []*Workspace{}, nil
+	}
+
+	var workspaces []*Workspace
+	for _, name := range dirNames {
+		ws, err := c.GetWorkspace(name)
+		if err != nil {
+			continue
+		}
+		workspaces = append(workspaces, ws)
+	}
+
+	return workspaces, nil
+}
+
+// GetWorkspace gets workspace information by name
+func (c *Client) GetWorkspace(name string) (*Workspace, error) {
+	workspacePath := filepath.Join(c.workspacesDir, name)
+	info, err := os.Stat(workspacePath)
+	if err != nil {
+		return nil, err
+	}
+
+	ws := &Workspace{
+		Name:     name,
+		Path:     workspacePath,
+		Created:  info.ModTime(),
+		Modified: info.ModTime(),
+	}
+
+	// Find repositories in workspace
+	// Create repo.Client with workspace path and call List()
+	wsRepoClient, err := repo.NewClient(workspacePath)
+	if err == nil {
+		repos, err := wsRepoClient.List(repo.ListInput{})
+		if err == nil {
+			ws.Repositories = repos
+		}
+	}
+
+	return ws, nil
+}
+
+// DeleteWorkspaceInput contains input parameters for workspace deletion
+type DeleteWorkspaceInput struct {
+	Name         string
+	Force        bool
+	KeepBranches bool
+	DeleteRemote bool
+}
+
+// DeleteWorkspaceResult contains the result of workspace deletion
+type DeleteWorkspaceResult struct {
+	ProcessedCount int
+}
+
+// DeleteWorkspace deletes a workspace
+func (c *Client) DeleteWorkspace(input DeleteWorkspaceInput) (*DeleteWorkspaceResult, error) {
+	// Get workspace info
+	ws, err := c.GetWorkspace(input.Name)
+	if err != nil {
+		return nil, fmt.Errorf("workspace '%s' not found: %w", input.Name, err)
+	}
+
+	result := &DeleteWorkspaceResult{}
+
+	// Remove worktrees and branches for each repository
+	for _, worktreeRepo := range ws.Repositories {
+		// Get original repository
+		originalRepo, err := worktreeRepo.Original()
+		if err != nil {
+			return nil, err
+		}
+
+		// Get branch name
+		branch, err := worktreeRepo.Branch()
+		if err != nil {
+			return nil, err
+		}
+
+		// Remove worktree
+		if err := originalRepo.RemoveWorktree(worktreeRepo.Path(), input.Force); err != nil {
+			return nil, err
+		}
+
+		// Delete branch (optional)
+		if !input.KeepBranches {
+			fmt.Println("Deleting branch", branch)
+			if err := originalRepo.DeleteBranch(branch); err != nil {
+				fmt.Println("Failed to delete branch", branch, err)
+				// Branch deletion failure is not critical
+			}
+		}
+
+		result.ProcessedCount++
+	}
+
+	// Delete workspace directory
+	if err := os.RemoveAll(ws.Path); err != nil {
+		return result, fmt.Errorf("failed to delete workspace directory: %w", err)
+	}
+
+	return result, nil
+}
+
+// copyUncommittedFiles copies uncommitted files from original repository to worktree
+func (c *Client) copyUncommittedFiles(originalRepo *repo.Local, worktreePath string) (int, error) {
+	// Get uncommitted files from original repository
+	files, err := originalRepo.UncommittedFiles()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get uncommitted files: %w", err)
+	}
+
+	if len(files) == 0 {
+		return 0, nil
+	}
+
+	// Copy each file
+	copiedCount := 0
+	for _, file := range files {
+		srcPath := filepath.Join(originalRepo.Path(), file)
+		dstPath := filepath.Join(worktreePath, file)
+
+		// Check if source file exists
+		if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+			// File might be deleted, skip
+			continue
+		}
+
+		// Create destination directory
+		dstDir := filepath.Dir(dstPath)
+		if err := os.MkdirAll(dstDir, 0755); err != nil {
+			return copiedCount, fmt.Errorf("failed to create directory %s: %w", dstDir, err)
+		}
+
+		// Copy file
+		srcData, err := os.ReadFile(srcPath)
+		if err != nil {
+			return copiedCount, fmt.Errorf("failed to read file %s: %w", srcPath, err)
+		}
+
+		if err := os.WriteFile(dstPath, srcData, 0644); err != nil {
+			return copiedCount, fmt.Errorf("failed to write file %s: %w", dstPath, err)
+		}
+
+		copiedCount++
+	}
+
+	return copiedCount, nil
+}
+
+// SyncRepositories synchronizes repositories
+func (c *Client) SyncRepositories(ctx context.Context, filter string, prune bool) error {
+	return c.repoClient.Sync(ctx, filter, prune)
 }

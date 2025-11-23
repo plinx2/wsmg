@@ -1,26 +1,28 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/plinx2/wsmg/internal/cli"
 	"github.com/plinx2/wsmg/internal/config"
-	"github.com/plinx2/wsmg/internal/git"
+	"github.com/plinx2/wsmg/internal/repo"
 	"github.com/spf13/cobra"
 )
 
+// ReposListOptions はリポジトリ一覧コマンドのオプションです
+type ReposListOptions struct {
+	Filter string `flag:"filter" short:"f" default:"" usage:"Filter by repository name or path"`
+	Format string `flag:"format" default:"table" usage:"Output format" choices:"table,json,yaml"`
+	Sort   string `flag:"sort" default:"path" usage:"Sort field" choices:"path,name,lastcommit"`
+}
+
 func newReposListCmd() *cobra.Command {
 	// Define options
-	opts := &struct {
-		Filter string `flag:"filter" short:"f" default:"" usage:"Filter by repository name or path"`
-		Format string `flag:"format" default:"table" usage:"Output format" choices:"table,json,yaml"`
-		Sort   string `flag:"sort" default:"path" usage:"Sort field" choices:"path,name,lastcommit"`
-	}{}
+	opts := &ReposListOptions{}
 
 	// Define command
 	cmd := &cobra.Command{
@@ -28,7 +30,7 @@ func newReposListCmd() *cobra.Command {
 		Short: "List repositories",
 		Long:  `Display a list of repositories in repos directory with path, branch, last commit, and other information.`,
 		RunE: func(c *cobra.Command, args []string) error {
-			return runReposList(opts.Filter, opts.Format, opts.Sort)
+			return runReposList(c.Context(), opts)
 		},
 	}
 
@@ -40,17 +42,27 @@ func newReposListCmd() *cobra.Command {
 	return cmd
 }
 
-func runReposList(filter, format, sortField string) error {
+func runReposList(ctx context.Context, opts *ReposListOptions) error {
 	reposDir := config.GetReposDir()
-
-	// Check if directory exists
-	if _, err := os.Stat(reposDir); os.IsNotExist(err) {
-		return fmt.Errorf("repos directory does not exist: %s", reposDir)
-	}
 
 	// Find repositories
 	fmt.Fprintf(os.Stderr, "Scanning repositories in %s...\n", reposDir)
-	repos, err := git.FindRepositories(reposDir)
+
+	// Convert sort field
+	var sortInput repo.ListSortField
+	switch opts.Sort {
+	case "name":
+		sortInput = repo.ListSortFieldName
+	case "lastcommit":
+		sortInput = repo.ListSortFieldLastCommit
+	default:
+		sortInput = repo.ListSortFieldPath
+	}
+
+	repos, err := repoClient.List(repo.ListInput{
+		Filter: opts.Filter,
+		Sort:   sortInput,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to find repositories: %w", err)
 	}
@@ -60,16 +72,8 @@ func runReposList(filter, format, sortField string) error {
 		return nil
 	}
 
-	// Filter
-	if filter != "" {
-		repos = filterRepositories(repos, filter)
-	}
-
-	// Sort
-	sortRepositories(repos, sortField)
-
 	// Output
-	switch format {
+	switch opts.Format {
 	case "json":
 		return outputJSON(repos, reposDir)
 	case "yaml":
@@ -79,38 +83,7 @@ func runReposList(filter, format, sortField string) error {
 	}
 }
 
-func filterRepositories(repos []*git.Repository, filter string) []*git.Repository {
-	var filtered []*git.Repository
-	filterLower := strings.ToLower(filter)
-
-	for _, repo := range repos {
-		if strings.Contains(strings.ToLower(repo.Path), filterLower) ||
-			strings.Contains(strings.ToLower(repo.Name), filterLower) {
-			filtered = append(filtered, repo)
-		}
-	}
-
-	return filtered
-}
-
-func sortRepositories(repos []*git.Repository, sortField string) {
-	switch sortField {
-	case "name":
-		sort.Slice(repos, func(i, j int) bool {
-			return repos[i].Name < repos[j].Name
-		})
-	case "lastcommit":
-		sort.Slice(repos, func(i, j int) bool {
-			return repos[i].LastModified.After(repos[j].LastModified)
-		})
-	default: // path
-		sort.Slice(repos, func(i, j int) bool {
-			return repos[i].Path < repos[j].Path
-		})
-	}
-}
-
-func outputTable(repos []*git.Repository, baseDir string) error {
+func outputTable(repos []*repo.Local, baseDir string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer w.Flush()
 
@@ -119,19 +92,34 @@ func outputTable(repos []*git.Repository, baseDir string) error {
 	fmt.Fprintln(w, "----\t------\t-----------\t-------------\t------")
 
 	// Data rows
-	for _, repo := range repos {
-		relPath := repo.RelativePath(baseDir)
+	for _, r := range repos {
+		relPath := r.RelativePath(baseDir)
+
+		branch, err := r.Branch()
+		if err != nil {
+			branch = "N/A"
+		}
+
+		lastCommit, err := r.LastCommit()
+		var commitInfo string
+		var timeStr string
+		if err != nil {
+			commitInfo = "N/A"
+			timeStr = "N/A"
+		} else {
+			commitInfo = fmt.Sprintf("%s %s", lastCommit.Hash(), truncate(lastCommit.Message(), 30))
+			timeStr = lastCommit.Timestamp().Format("2006-01-02 15:04")
+		}
+
+		isClean, err := r.IsClean()
 		status := "clean"
-		if !repo.IsClean {
+		if err == nil && !isClean {
 			status = "dirty"
 		}
 
-		commitInfo := fmt.Sprintf("%s %s", repo.LastCommit, truncate(repo.LastMessage, 30))
-		timeStr := repo.LastModified.Format("2006-01-02 15:04")
-
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 			relPath,
-			repo.Branch,
+			branch,
 			commitInfo,
 			timeStr,
 			status,
@@ -143,13 +131,11 @@ func outputTable(repos []*git.Repository, baseDir string) error {
 	return nil
 }
 
-func outputJSON(repos []*git.Repository, baseDir string) error {
+func outputJSON(repos []*repo.Local, baseDir string) error {
 	type RepoJSON struct {
 		Path         string `json:"path"`
 		RelativePath string `json:"relativePath"`
 		Name         string `json:"name"`
-		Provider     string `json:"provider,omitempty"`
-		Organization string `json:"organization,omitempty"`
 		Branch       string `json:"branch"`
 		LastCommit   string `json:"lastCommit"`
 		LastMessage  string `json:"lastMessage"`
@@ -158,19 +144,26 @@ func outputJSON(repos []*git.Repository, baseDir string) error {
 	}
 
 	var output []RepoJSON
-	for _, repo := range repos {
-		output = append(output, RepoJSON{
-			Path:         repo.Path,
-			RelativePath: repo.RelativePath(baseDir),
-			Name:         repo.Name,
-			Provider:     repo.Provider,
-			Organization: repo.Organization,
-			Branch:       repo.Branch,
-			LastCommit:   repo.LastCommit,
-			LastMessage:  repo.LastMessage,
-			LastModified: repo.LastModified.Format("2006-01-02T15:04:05Z07:00"),
-			IsClean:      repo.IsClean,
-		})
+	for _, r := range repos {
+		branch, _ := r.Branch()
+		lastCommit, _ := r.LastCommit()
+		isClean, _ := r.IsClean()
+
+		item := RepoJSON{
+			Path:         r.Path(),
+			RelativePath: r.RelativePath(baseDir),
+			Name:         r.Name(),
+			Branch:       branch,
+			IsClean:      isClean,
+		}
+
+		if lastCommit != nil {
+			item.LastCommit = lastCommit.Hash()
+			item.LastMessage = lastCommit.Message()
+			item.LastModified = lastCommit.Timestamp().Format("2006-01-02T15:04:05Z07:00")
+		}
+
+		output = append(output, item)
 	}
 
 	encoder := json.NewEncoder(os.Stdout)
@@ -178,22 +171,24 @@ func outputJSON(repos []*git.Repository, baseDir string) error {
 	return encoder.Encode(output)
 }
 
-func outputYAML(repos []*git.Repository, baseDir string) error {
+func outputYAML(repos []*repo.Local, baseDir string) error {
 	fmt.Println("repositories:")
-	for _, repo := range repos {
-		fmt.Printf("  - path: %s\n", repo.RelativePath(baseDir))
-		fmt.Printf("    name: %s\n", repo.Name)
-		if repo.Provider != "" {
-			fmt.Printf("    provider: %s\n", repo.Provider)
+	for _, r := range repos {
+		fmt.Printf("  - path: %s\n", r.RelativePath(baseDir))
+		fmt.Printf("    name: %s\n", r.Name())
+
+		branch, _ := r.Branch()
+		fmt.Printf("    branch: %s\n", branch)
+
+		lastCommit, _ := r.LastCommit()
+		if lastCommit != nil {
+			fmt.Printf("    lastCommit: %s\n", lastCommit.Hash())
+			fmt.Printf("    lastMessage: %s\n", lastCommit.Message())
+			fmt.Printf("    lastModified: %s\n", lastCommit.Timestamp().Format("2006-01-02T15:04:05Z07:00"))
 		}
-		if repo.Organization != "" {
-			fmt.Printf("    organization: %s\n", repo.Organization)
-		}
-		fmt.Printf("    branch: %s\n", repo.Branch)
-		fmt.Printf("    lastCommit: %s\n", repo.LastCommit)
-		fmt.Printf("    lastMessage: %s\n", repo.LastMessage)
-		fmt.Printf("    lastModified: %s\n", repo.LastModified.Format("2006-01-02T15:04:05Z07:00"))
-		fmt.Printf("    isClean: %t\n", repo.IsClean)
+
+		isClean, _ := r.IsClean()
+		fmt.Printf("    isClean: %t\n", isClean)
 	}
 	fmt.Printf("\ntotal: %d\n", len(repos))
 	return nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,24 +11,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newConfigInitCmd() *cobra.Command {
-	// オプション定義
-	opts := &struct {
-		Force       bool `flag:"force" short:"f" default:"false" usage:"既存の設定ファイルを確認なしで上書き"`
-		Interactive bool `flag:"interactive" short:"i" default:"false" usage:"対話形式で設定値を入力"`
-	}{}
+// ConfigInitOptions represents options for config init command
+type ConfigInitOptions struct {
+	Force       bool `flag:"force" short:"f" default:"false" usage:"Overwrite existing config file without confirmation"`
+	Interactive bool `flag:"interactive" short:"i" default:"false" usage:"Enter configuration values interactively"`
+}
 
-	// コマンド定義
+func newConfigInitCmd() *cobra.Command {
+	// Define options
+	opts := &ConfigInitOptions{}
+
+	// Define command
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Initialize configuration file",
-		Long:  `設定ファイルを初期化します。既に設定ファイルが存在する場合は、上書き確認を行います。`,
+		Long:  `Initialize configuration file. If a config file already exists, prompts for confirmation to overwrite.`,
 		RunE: func(c *cobra.Command, args []string) error {
-			return runConfigInit(opts.Force, opts.Interactive)
+			return runConfigInit(c.Context(), opts)
 		},
 	}
 
-	// フラグ定義
+	// Bind flags
 	if err := cli.BindFlags(cmd, opts); err != nil {
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
@@ -35,58 +39,55 @@ func newConfigInitCmd() *cobra.Command {
 	return cmd
 }
 
-func runConfigInit(force, interactive bool) error {
-	// ホームディレクトリを取得
+func runConfigInit(ctx context.Context, opts *ConfigInitOptions) error {
+	// Get home directory
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("ホームディレクトリの取得に失敗しました: %w", err)
+		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// 設定ディレクトリのパス
+	// Config directory path
 	configDir := filepath.Join(home, ".config", "wsmg")
 	configFile := filepath.Join(configDir, "wsmg.json")
 
-	// 既に設定ファイルが存在する場合
+	// Check if config file already exists
 	if _, err := os.Stat(configFile); err == nil {
-		if !force {
-			fmt.Printf("設定ファイルが既に存在します: %s\n", configFile)
-			fmt.Print("上書きしますか? (y/N): ")
-			var answer string
-			fmt.Scanln(&answer)
-			if answer != "y" && answer != "Y" {
-				fmt.Println("キャンセルしました。")
+		if !opts.Force {
+			fmt.Printf("Configuration file already exists: %s\n", configFile)
+			if !cli.ConfirmAction("Overwrite?") {
+				fmt.Println("Cancelled.")
 				return nil
 			}
 		}
 	}
 
-	// 設定ディレクトリを作成
+	// Create config directory
 	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("設定ディレクトリの作成に失敗しました: %w", err)
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// デフォルト設定を作成
-	config := map[string]interface{}{
+	// Create default configuration
+	config := map[string]any{
 		"repos":      filepath.Join(home, "repos"),
 		"workspaces": filepath.Join(home, "workspaces"),
-		"env":        []interface{}{},
-		"remotes":    []interface{}{},
+		"env":        []any{},
+		"remotes":    []any{},
 	}
 
-	// 対話形式の場合
-	if interactive {
-		fmt.Println("\n設定を入力してください（Enterでデフォルト値）:")
+	// Interactive mode
+	if opts.Interactive {
+		fmt.Println("\nEnter configuration values (press Enter for default):")
 
-		// repos ディレクトリ
-		fmt.Printf("repos ディレクトリ [%s]: ", config["repos"])
+		// repos directory
+		fmt.Printf("repos directory [%s]: ", config["repos"])
 		var reposInput string
 		fmt.Scanln(&reposInput)
 		if reposInput != "" {
 			config["repos"] = reposInput
 		}
 
-		// workspaces ディレクトリ
-		fmt.Printf("workspaces ディレクトリ [%s]: ", config["workspaces"])
+		// workspaces directory
+		fmt.Printf("workspaces directory [%s]: ", config["workspaces"])
 		var workspacesInput string
 		fmt.Scanln(&workspacesInput)
 		if workspacesInput != "" {
@@ -94,18 +95,18 @@ func runConfigInit(force, interactive bool) error {
 		}
 	}
 
-	// JSONファイルに書き込み
+	// Write to JSON file
 	jsonData, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return fmt.Errorf("JSON の生成に失敗しました: %w", err)
+		return fmt.Errorf("failed to generate JSON: %w", err)
 	}
 
 	if err := os.WriteFile(configFile, jsonData, 0644); err != nil {
-		return fmt.Errorf("設定ファイルの書き込みに失敗しました: %w", err)
+		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	fmt.Printf("\n設定ファイルを作成しました: %s\n\n", configFile)
-	fmt.Println("デフォルト設定:")
+	fmt.Printf("\nConfiguration file created: %s\n\n", configFile)
+	fmt.Println("Default configuration:")
 	fmt.Printf("  repos:      %s\n", config["repos"])
 	fmt.Printf("  workspaces: %s\n", config["workspaces"])
 

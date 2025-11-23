@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,12 +12,15 @@ import (
 	"github.com/spf13/viper"
 )
 
+// ConfigShowOptions はコンフィグ表示コマンドのオプションです
+type ConfigShowOptions struct {
+	Format  string `flag:"format" default:"table" usage:"出力フォーマット" choices:"table,json,yaml"`
+	Sources bool   `flag:"sources" default:"false" usage:"各設定値の取得元を表示"`
+}
+
 func newConfigShowCmd() *cobra.Command {
 	// オプション定義
-	opts := &struct {
-		Format  string `flag:"format" default:"table" usage:"出力フォーマット" choices:"table,json,yaml"`
-		Sources bool   `flag:"sources" default:"false" usage:"各設定値の取得元を表示"`
-	}{}
+	opts := &ConfigShowOptions{}
 
 	// コマンド定義
 	cmd := &cobra.Command{
@@ -24,7 +28,7 @@ func newConfigShowCmd() *cobra.Command {
 		Short: "Show current configuration",
 		Long:  `現在の設定を表示します。コマンドラインフラグ、環境変数、設定ファイルの優先順位を考慮した、実際に使用される設定値を表示します。`,
 		RunE: func(c *cobra.Command, args []string) error {
-			return runConfigShow(opts.Format, opts.Sources)
+			return runConfigShow(c.Context(), opts)
 		},
 	}
 
@@ -36,19 +40,19 @@ func newConfigShowCmd() *cobra.Command {
 	return cmd
 }
 
-func runConfigShow(format string, showSources bool) error {
+func runConfigShow(ctx context.Context, opts *ConfigShowOptions) error {
 	cfg, err := config.GetConfig()
 	if err != nil {
 		return fmt.Errorf("設定の取得に失敗しました: %w", err)
 	}
 
-	switch format {
+	switch opts.Format {
 	case "json":
 		return showConfigJSON(cfg)
 	case "yaml":
 		return showConfigYAML(cfg)
 	default:
-		return showConfigTable(cfg, showSources)
+		return showConfigTable(cfg, opts.Sources)
 	}
 }
 
@@ -79,7 +83,7 @@ func showConfigYAML(cfg *config.Config) error {
 		fmt.Println("remotes:")
 		for _, remote := range cfg.Remotes {
 			fmt.Println("  - type:", remote.Type)
-			fmt.Println("    url:", remote.URL)
+			fmt.Println("    host:", remote.Host)
 		}
 	}
 
@@ -116,7 +120,7 @@ func showConfigTable(cfg *config.Config, showSources bool) error {
 		fmt.Println("\nRemotes:")
 		for i, remote := range cfg.Remotes {
 			fmt.Printf("  [%d] type: %s\n", i, remote.Type)
-			fmt.Printf("      url:  %s\n", remote.URL)
+			fmt.Printf("      host: %s\n", remote.Host)
 		}
 	}
 

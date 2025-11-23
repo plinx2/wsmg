@@ -2,25 +2,29 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/plinx2/wsmg/internal/cli"
 	"github.com/plinx2/wsmg/internal/config"
-	"github.com/plinx2/wsmg/internal/git"
+	"github.com/plinx2/wsmg/internal/repo"
 	"github.com/plinx2/wsmg/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
+// WorkspaceCreateOptions represents options for workspace create command
+type WorkspaceCreateOptions struct {
+	Repos           []string `flag:"repos" short:"r" usage:"Specify repositories to include (comma-separated, skips interactive mode)"`
+	BaseBranch      string   `flag:"base-branch" short:"b" default:"" usage:"Base branch for working branches (default: main/master)"`
+	NoVSCode        bool     `flag:"no-vscode" default:"false" usage:"Do not create VSCode workspace file"`
+	CopyUncommitted bool     `flag:"copy-uncommitted" default:"true" usage:"Copy uncommitted changes and untracked files to worktree"`
+}
+
 func newWorkspaceCreateCmd() *cobra.Command {
 	// Define options
-	opts := &struct {
-		Repos      []string `flag:"repos" short:"r" usage:"Specify repositories to include (comma-separated, skips interactive mode)"`
-		BaseBranch string   `flag:"base-branch" short:"b" default:"" usage:"Base branch for working branches (default: main/master)"`
-		NoVSCode   bool     `flag:"no-vscode" default:"false" usage:"Do not create VSCode workspace file"`
-	}{}
+	opts := &WorkspaceCreateOptions{}
 
 	// Define command
 	cmd := &cobra.Command{
@@ -35,8 +39,7 @@ The workspace directory structure will mirror the repos directory structure:
   workspaces/<ticket>/provider.com/organization/repository`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			ticketName := args[0]
-			return runWorkspaceCreate(ticketName, opts.Repos, opts.BaseBranch, opts.NoVSCode)
+			return runWorkspaceCreate(c.Context(), args[0], opts)
 		},
 	}
 
@@ -48,23 +51,17 @@ The workspace directory structure will mirror the repos directory structure:
 	return cmd
 }
 
-func runWorkspaceCreate(ticketName string, repoList []string, baseBranch string, noVSCode bool) error {
+func runWorkspaceCreate(ctx context.Context, name string, opts *WorkspaceCreateOptions) error {
 	reposDir := config.GetReposDir()
-	workspacesDir := config.GetWorkspacesDir()
 
 	// Check if workspace already exists
-	if workspace.WorkspaceExists(workspacesDir, ticketName) {
-		return fmt.Errorf("workspace '%s' already exists", ticketName)
-	}
-
-	// Check if repos directory exists
-	if _, err := os.Stat(reposDir); os.IsNotExist(err) {
-		return fmt.Errorf("repos directory does not exist: %s", reposDir)
+	if _, err := workspaceClient.GetWorkspace(name); err == nil {
+		return fmt.Errorf("workspace '%s' already exists", name)
 	}
 
 	// Find repositories
 	fmt.Fprintf(os.Stderr, "Scanning repositories in %s...\n", reposDir)
-	allRepos, err := git.FindRepositories(reposDir)
+	allRepos, err := repoClient.List(repo.ListInput{})
 	if err != nil {
 		return fmt.Errorf("failed to find repositories: %w", err)
 	}
@@ -74,146 +71,79 @@ func runWorkspaceCreate(ticketName string, repoList []string, baseBranch string,
 	}
 
 	// Determine repositories to use
-	var selectedRepos []*git.Repository
-	if len(repoList) > 0 {
+	var selectedRepoNames []string
+	if len(opts.Repos) > 0 {
 		// Use repositories specified via command line
-		selectedRepos = selectReposByNames(allRepos, repoList, reposDir)
-		if len(selectedRepos) == 0 {
-			return fmt.Errorf("specified repositories not found")
-		}
+		selectedRepoNames = opts.Repos
 	} else {
 		// Interactive selection
-		selectedRepos, err = selectReposInteractive(allRepos, reposDir)
+		selectedRepoNames, err = selectReposInteractive(allRepos, reposDir)
 		if err != nil {
 			return err
 		}
-		if len(selectedRepos) == 0 {
+		if len(selectedRepoNames) == 0 {
 			fmt.Println("No repositories selected.")
 			return nil
 		}
 	}
 
-	fmt.Printf("\nSelected repositories: %d\n", len(selectedRepos))
-	for _, repo := range selectedRepos {
-		fmt.Printf("  - %s\n", repo.RelativePath(reposDir))
+	// Display selected repositories
+	fmt.Printf("\nSelected repositories: %d\n", len(selectedRepoNames))
+	for _, name := range selectedRepoNames {
+		fmt.Printf("  - %s\n", name)
 	}
 
 	// Confirmation
-	if !confirmAction("\nCreate workspace?") {
+	if !cli.ConfirmAction("\nCreate workspace?") {
 		fmt.Println("Cancelled.")
 		return nil
 	}
 
-	// Create workspace directory
-	workspacePath, err := workspace.CreateWorkspaceDir(workspacesDir, ticketName)
+	// Get copy patterns from config
+	copyPatterns := config.GetCopyPatterns()
+
+	fmt.Printf("\nCreating workspace: %s\n\n", name)
+
+	// Create workspace
+	result, err := workspaceClient.CreateWorkspace(ctx, workspace.CreateWorkspaceInput{
+		Name:            name,
+		RepoNames:       selectedRepoNames,
+		BaseBranch:      opts.BaseBranch,
+		CopyPatterns:    copyPatterns,
+		NoVSCode:        opts.NoVSCode,
+		CopyUncommitted: opts.CopyUncommitted,
+	})
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("\nCreating workspace: %s\n\n", workspacePath)
-
-	// Get copy patterns from config
-	copyPatterns := config.GetCopyPatterns()
-
-	// Create worktrees for each repository
-	var workspaceRepos []workspace.RepositoryInfo
-	successCount := 0
-	errorCount := 0
-
-	for _, repo := range selectedRepos {
-		relPath := repo.RelativePath(reposDir)
-		fmt.Printf("Processing %s...", relPath)
-
-		// Build repository path within workspace, maintaining provider/organization structure
-		// Example: workspaces/TICKET-001/github.com/org/repo
-		worktreePath := filepath.Join(workspacePath, relPath)
-
-		// Determine base branch
-		base := baseBranch
-		if base == "" {
-			// Get default branch
-			defaultBranch, err := git.GetDefaultBranch(repo.Path)
-			if err != nil {
-				// Fallback to current branch
-				base = repo.Branch
-			} else {
-				base = defaultBranch
-			}
-		}
-
-		// Create worktree
-		if err := git.AddWorktree(repo.Path, worktreePath, ticketName, base); err != nil {
-			fmt.Printf(" ✗ failed: %v\n", err)
-			errorCount++
-			continue
-		}
-
-		fmt.Println(" ✓")
-		successCount++
-
-		// Copy environment files from original repository to worktree
-		copiedFiles, err := workspace.CopyEnvironmentFiles(repo.Path, worktreePath, copyPatterns)
-		if err == nil && len(copiedFiles) > 0 {
-			fmt.Printf("  Copied: %s\n", strings.Join(copiedFiles, ", "))
-		}
-
-		// Add to workspace info
-		workspaceRepos = append(workspaceRepos, workspace.RepositoryInfo{
-			Name:         repo.Name,
-			RelativePath: relPath,
-			Branch:       ticketName,
-		})
-	}
-
-	// Generate VSCode workspace file
-	if !noVSCode && len(workspaceRepos) > 0 {
-		fmt.Print("\nGenerating VSCode workspace file...")
-		if err := workspace.GenerateVSCodeWorkspace(workspacePath, ticketName, workspaceRepos); err != nil {
-			fmt.Printf(" ✗ failed: %v\n", err)
-		} else {
-			fmt.Println(" ✓")
-		}
-	}
-
 	// Display summary
 	fmt.Printf("\nSummary:\n")
-	fmt.Printf("  Success: %d repositories\n", successCount)
-	if errorCount > 0 {
-		fmt.Printf("  Error:   %d repositories\n", errorCount)
+	fmt.Printf("  Success: %d repositories\n", result.SuccessCount)
+	if result.ErrorCount > 0 {
+		fmt.Printf("  Error:   %d repositories\n", result.ErrorCount)
 	}
-	fmt.Printf("\nWorkspace created: %s\n", workspacePath)
+	if result.UncommittedFilesCopied > 0 {
+		fmt.Printf("  Copied:  %d uncommitted file(s)\n", result.UncommittedFilesCopied)
+	}
+	fmt.Printf("\nWorkspace created: %s\n", result.WorkspacePath)
 
-	if !noVSCode {
+	if !opts.NoVSCode {
 		fmt.Printf("\nTo open in VSCode:\n")
-		fmt.Printf("  code %s/%s.code-workspace\n", workspacePath, ticketName)
+		fmt.Printf("  code %s/%s.code-workspace\n", result.WorkspacePath, name)
 	}
 
 	return nil
 }
 
-func selectReposByNames(allRepos []*git.Repository, names []string, baseDir string) []*git.Repository {
-	var selected []*git.Repository
-
-	for _, repo := range allRepos {
-		relPath := repo.RelativePath(baseDir)
-		for _, name := range names {
-			if strings.Contains(relPath, name) || strings.Contains(repo.Name, name) {
-				selected = append(selected, repo)
-				break
-			}
-		}
-	}
-
-	return selected
-}
-
-func selectReposInteractive(allRepos []*git.Repository, baseDir string) ([]*git.Repository, error) {
+func selectReposInteractive(allRepos []*repo.Local, baseDir string) ([]string, error) {
 	fmt.Println("\nSelect repositories (enter numbers separated by commas, or 'all' for all):")
 	fmt.Println()
 
 	// Display repository list
-	for i, repo := range allRepos {
-		fmt.Printf("  [%d] %s (branch: %s)\n", i+1, repo.RelativePath(baseDir), repo.Branch)
+	for i, r := range allRepos {
+		branch, _ := r.Branch()
+		fmt.Printf("  [%d] %s (branch: %s)\n", i+1, r.RelativePath(baseDir), branch)
 	}
 
 	fmt.Print("\nSelection (e.g., 1,3,5 or all): ")
@@ -226,16 +156,20 @@ func selectReposInteractive(allRepos []*git.Repository, baseDir string) ([]*git.
 	input = strings.TrimSpace(input)
 
 	if input == "all" {
-		return allRepos, nil
+		var allNames []string
+		for _, r := range allRepos {
+			allNames = append(allNames, r.RelativePath(baseDir))
+		}
+		return allNames, nil
 	}
 
 	// Parse numbers
 	indices := parseIndices(input)
-	var selected []*git.Repository
+	var selected []string
 
 	for _, idx := range indices {
 		if idx > 0 && idx <= len(allRepos) {
-			selected = append(selected, allRepos[idx-1])
+			selected = append(selected, allRepos[idx-1].RelativePath(baseDir))
 		}
 	}
 
@@ -255,16 +189,4 @@ func parseIndices(input string) []int {
 	}
 
 	return indices
-}
-
-func confirmAction(message string) bool {
-	fmt.Printf("%s (y/N): ", message)
-	reader := bufio.NewReader(os.Stdin)
-	answer, err := reader.ReadString('\n')
-	if err != nil {
-		return false
-	}
-
-	answer = strings.TrimSpace(strings.ToLower(answer))
-	return answer == "y" || answer == "yes"
 }

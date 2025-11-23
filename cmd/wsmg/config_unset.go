@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,25 +12,27 @@ import (
 	"github.com/spf13/viper"
 )
 
-func newConfigUnsetCmd() *cobra.Command {
-	// オプション定義
-	opts := &struct {
-		Force bool `flag:"force" short:"f" default:"false" usage:"確認なしで削除"`
-	}{}
+// ConfigUnsetOptions represents options for config unset command
+type ConfigUnsetOptions struct {
+	Force bool `flag:"force" short:"f" default:"false" usage:"Delete without confirmation"`
+}
 
-	// コマンド定義
+func newConfigUnsetCmd() *cobra.Command {
+	// Define options
+	opts := &ConfigUnsetOptions{}
+
+	// Define command
 	cmd := &cobra.Command{
 		Use:   "unset <key>",
 		Short: "Delete a configuration value",
-		Long:  `指定したキーを設定ファイルから削除します。`,
+		Long:  `Delete the specified key from the configuration file.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			key := args[0]
-			return runConfigUnset(key, opts.Force)
+			return runConfigUnset(c.Context(), args[0], opts)
 		},
 	}
 
-	// フラグ定義
+	// Bind flags
 	if err := cli.BindFlags(cmd, opts); err != nil {
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
@@ -37,8 +40,8 @@ func newConfigUnsetCmd() *cobra.Command {
 	return cmd
 }
 
-func runConfigUnset(key string, force bool) error {
-	// 必須キーのチェック
+func runConfigUnset(ctx context.Context, key string, opts *ConfigUnsetOptions) error {
+	// Check required keys
 	requiredKeys := []string{"repos", "workspaces"}
 	for _, reqKey := range requiredKeys {
 		if key == reqKey {
@@ -46,53 +49,50 @@ func runConfigUnset(key string, force bool) error {
 		}
 	}
 
-	// キーが存在するかチェック
+	// Check if key exists
 	if !viper.IsSet(key) {
-		return fmt.Errorf("キー '%s' は存在しません", key)
+		return fmt.Errorf("key '%s' does not exist", key)
 	}
 
-	// 確認プロンプト
-	if !force {
-		fmt.Printf("キー '%s' を削除しますか? (y/N): ", key)
-		var answer string
-		fmt.Scanln(&answer)
-		if answer != "y" && answer != "Y" {
-			fmt.Println("キャンセルしました。")
+	// Confirmation prompt
+	if !opts.Force {
+		if !cli.ConfirmAction(fmt.Sprintf("Delete key '%s'?", key)) {
+			fmt.Println("Cancelled.")
 			return nil
 		}
 	}
 
-	// 設定ファイルを読み込み
+	// Load config file
 	configFile := viper.ConfigFileUsed()
 	if configFile == "" {
-		return fmt.Errorf("設定ファイルが見つかりません")
+		return fmt.Errorf("config file not found")
 	}
 
-	// JSONファイルを読み込み
+	// Read JSON file
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		return fmt.Errorf("設定ファイルの読み込みに失敗しました: %w", err)
+		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	// JSONをパース
-	var config map[string]interface{}
+	// Parse JSON
+	var config map[string]any
 	if err := json.Unmarshal(data, &config); err != nil {
-		return fmt.Errorf("JSON のパースに失敗しました: %w", err)
+		return fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	// キーを削除（ドット記法に対応）
+	// Delete key (supports dot notation)
 	if err := deleteNestedKey(config, key); err != nil {
-		return fmt.Errorf("キーの削除に失敗しました: %w", err)
+		return fmt.Errorf("failed to delete key: %w", err)
 	}
 
-	// JSONファイルに書き戻し
+	// Write back to JSON file
 	jsonData, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return fmt.Errorf("JSON の生成に失敗しました: %w", err)
+		return fmt.Errorf("failed to generate JSON: %w", err)
 	}
 
 	if err := os.WriteFile(configFile, jsonData, 0644); err != nil {
-		return fmt.Errorf("設定ファイルの書き込みに失敗しました: %w", err)
+		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	fmt.Printf("Removed: %s\n", key)
@@ -100,23 +100,23 @@ func runConfigUnset(key string, force bool) error {
 	return nil
 }
 
-func deleteNestedKey(config map[string]interface{}, key string) error {
+func deleteNestedKey(config map[string]any, key string) error {
 	parts := strings.Split(key, ".")
 
 	if len(parts) == 1 {
-		// トップレベルのキー
+		// Top-level key
 		delete(config, key)
 		return nil
 	}
 
-	// ネストされたキー
+	// Nested key
 	current := config
 	for i := 0; i < len(parts)-1; i++ {
 		part := parts[i]
-		if next, ok := current[part].(map[string]interface{}); ok {
+		if next, ok := current[part].(map[string]any); ok {
 			current = next
 		} else {
-			return fmt.Errorf("キーが見つかりません: %s", key)
+			return fmt.Errorf("key not found: %s", key)
 		}
 	}
 
