@@ -34,6 +34,10 @@ func newWorkspaceAddCmd() *cobra.Command {
 	cmd.Flags().StringSliceVarP(&opts.Repos, "repo", "r", []string{}, "Repository paths to add (relative to repos directory)")
 	cmd.Flags().BoolVar(&opts.CopyUncommitted, "copy-uncommitted", false, "Copy uncommitted changes and untracked files to worktree")
 
+	// Register completions
+	cmd.ValidArgsFunction = workspaceNameCompletion
+	cmd.RegisterFlagCompletionFunc("repo", repoPathCompletion)
+
 	return cmd
 }
 

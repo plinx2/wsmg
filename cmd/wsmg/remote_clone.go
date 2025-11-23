@@ -45,6 +45,9 @@ func newRemoteCloneCmd() *cobra.Command {
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
 
+	// Register completions
+	cmd.RegisterFlagCompletionFunc("provider", providerCompletion)
+
 	return cmd
 }
 

@@ -39,6 +39,9 @@ func newReposListCmd() *cobra.Command {
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
 
+	// Register completions
+	cmd.RegisterFlagCompletionFunc("format", formatCompletion)
+
 	return cmd
 }
 

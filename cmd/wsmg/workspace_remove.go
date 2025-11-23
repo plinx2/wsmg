@@ -36,6 +36,9 @@ func newWorkspaceRemoveCmd() *cobra.Command {
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
 
+	// Register completions
+	cmd.ValidArgsFunction = workspaceNameCompletion
+
 	return cmd
 }
 

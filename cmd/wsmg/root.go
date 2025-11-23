@@ -90,8 +90,6 @@ func init() {
 		},
 	})
 
-	// Register completion functions (will be called after client initialization)
-	cobra.OnInitialize(registerCompletions)
 }
 
 func initConfig() {

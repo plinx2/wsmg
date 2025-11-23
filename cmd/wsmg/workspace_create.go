@@ -48,6 +48,9 @@ The workspace directory structure will mirror the repos directory structure:
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
 
+	// Register completions
+	cmd.RegisterFlagCompletionFunc("repos", repoPathCompletion)
+
 	return cmd
 }
 

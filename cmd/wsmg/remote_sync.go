@@ -42,6 +42,9 @@ Detects new repositories that exist remotely but not locally.`,
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
 
+	// Register completions
+	cmd.RegisterFlagCompletionFunc("provider", providerCompletion)
+
 	return cmd
 }
 

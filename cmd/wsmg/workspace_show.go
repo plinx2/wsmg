@@ -61,6 +61,10 @@ func newWorkspaceShowCmd() *cobra.Command {
 		panic(fmt.Sprintf("failed to bind flags: %v", err))
 	}
 
+	// Register completions
+	cmd.ValidArgsFunction = workspaceNameCompletion
+	cmd.RegisterFlagCompletionFunc("format", formatCompletion)
+
 	return cmd
 }
 
