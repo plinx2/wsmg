@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/plinx2/wsmg/internal/cli"
@@ -110,7 +111,7 @@ func outputTable(repos []*repo.Local, baseDir string) error {
 			commitInfo = "N/A"
 			timeStr = "N/A"
 		} else {
-			commitInfo = fmt.Sprintf("%s %s", lastCommit.Hash(), truncate(lastCommit.Message(), 30))
+			commitInfo = fmt.Sprintf("%s %s", lastCommit.Hash(), truncate(strings.ReplaceAll(lastCommit.Message(), "\n", " "), 30))
 			timeStr = lastCommit.Timestamp().Format("2006-01-02 15:04")
 		}
 
