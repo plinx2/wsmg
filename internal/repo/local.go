@@ -518,8 +518,12 @@ func (c *Client) List(input ListInput) ([]*Local, error) {
 	paths, err := fs.Find(c.reposDir, func(path string) (bool, error) {
 		gitPath := filepath.Join(path, ".git")
 		if _, err := os.Stat(gitPath); err != nil {
-			return false, nil
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, fs.ErrStop
 		}
+		// found a .git directory
 		if input.Filter != "" && !strings.Contains(path, input.Filter) {
 			return false, fs.ErrStop
 		}
@@ -531,8 +535,7 @@ func (c *Client) List(input ListInput) ([]*Local, error) {
 
 	var repos []*Local
 	for _, path := range paths {
-		repoPath := filepath.Dir(path)
-		r, err := NewLocal(repoPath)
+		r, err := NewLocal(path)
 		if err != nil {
 			return nil, err
 		}
