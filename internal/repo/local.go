@@ -516,11 +516,12 @@ type ListInput struct {
 // List lists all repositories in the repositories directory
 func (c *Client) List(input ListInput) ([]*Local, error) {
 	paths, err := fs.Find(c.reposDir, func(path string) (bool, error) {
-		if filepath.Base(path) != ".git" {
+		gitPath := filepath.Join(path, ".git")
+		if _, err := os.Stat(gitPath); err != nil {
 			return false, nil
 		}
 		if input.Filter != "" && !strings.Contains(path, input.Filter) {
-			return false, nil
+			return false, fs.ErrStop
 		}
 		return true, fs.ErrStop
 	})
