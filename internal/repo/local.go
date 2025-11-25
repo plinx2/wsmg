@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -34,7 +33,8 @@ type Local struct {
 
 func NewLocal(path string) (*Local, error) {
 	r, err := git.PlainOpenWithOptions(path, &git.PlainOpenOptions{
-		DetectDotGit: true,
+		DetectDotGit:          true,
+		EnableDotGitCommonDir: true,
 	})
 	if err != nil {
 		return nil, err
@@ -272,18 +272,15 @@ func (r *Local) DeleteRemoteBranch(branch string) error {
 }
 
 func (r *Local) IsClean() (bool, error) {
-	trees, err := r.repo.TreeObjects()
+	wt, err := r.repo.Worktree()
 	if err != nil {
 		return false, err
 	}
-	defer trees.Close()
-	if _, err := trees.Next(); err != nil {
-		if errors.Is(err, io.EOF) {
-			return true, nil
-		}
+	status, err := wt.Status()
+	if err != nil {
 		return false, err
 	}
-	return false, nil
+	return status.IsClean(), nil
 }
 
 func (r *Local) LastCommit() (*Commit, error) {
